@@ -7,7 +7,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "test": "ts-node src/test/simulation.ts"
+    "test": "ts-node src/test/suite.ts",
+    "simulate": "ts-node src/test/simulation.ts",
+    "multinode": "ts-node src/test/multinode.ts"
   },
   "dependencies": {
     "leveldb": "^0.2.0",
