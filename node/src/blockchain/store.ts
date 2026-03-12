@@ -14,7 +14,7 @@ import * as fs    from 'fs';
 import { Block, BlockchainState, UTXO } from './types';
 
 // BigInt JSON serialization
-function bigintReplacer(_: string, v: unknown) {
+export function bigintReplacer(_: string, v: unknown) {
   return typeof v === 'bigint' ? { __bigint__: v.toString() } : v;
 }
 function bigintReviver(_: string, v: unknown) {
@@ -27,7 +27,7 @@ function bigintReviver(_: string, v: unknown) {
 const DEFAULT_DIR = path.join(process.env.HOME || '.', '.axon', 'chain');
 
 // Recursively restore BigInt wrappers in a deserialized object
-function restoreBigInts(obj: any): any {
+export function restoreBigInts(obj: any): any {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj === 'object' && '__bigint__' in obj) return BigInt(obj.__bigint__);
   if (Array.isArray(obj)) return obj.map(restoreBigInts);

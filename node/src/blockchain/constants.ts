@@ -45,10 +45,13 @@ export const RPC_PORT = 8332;
 // Prevents long-range reorg attacks on a young chain.
 // Add entries after mainnet is live and chain has sufficient depth.
 // Format: [height, hash]
+// Testnet checkpoints — added 2026-03-12 after first persistent node run
+// These prevent reorganizing away from the established testnet chain.
+// Add mainnet checkpoints here after launch.
 export const CHECKPOINTS: Array<[number, string]> = [
-  // Genesis is always implicitly checked via GENESIS_HASH
-  // [1000,  'add-after-mainnet-launch'],
-  // [10000, 'add-after-mainnet-launch'],
+  [15, '00ce542d82052af073162b5fa8c75cb34d89ea0696cdb4dad978ce0e6b6825a9'],
+  [20, '00e45a1e8f747bb63fac00fe620c22bcaff54126d3152bb026747dd93595f383'],
+  [24, '00b8ca51cc3208e8353de25a82ef794e2b37b8529545b193e264275f3ef04ccb'],
 ];
 
 // DNS seed hostnames — these resolve to IPs of stable seed nodes.

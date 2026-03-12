@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AXON Explorer</title>
+  <style>
+    :root {
+      --bg:       #0a0a0f;
+      --surface:  #12121a;
+      --border:   #1e1e2e;
+      --accent:   #7c3aed;
+      --accent2:  #a855f7;
+      --green:    #22c55e;
+      --yellow:   #eab308;
+      --text:     #e2e8f0;
+      --muted:    #64748b;
+      --mono:     'Courier New', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.3rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    .logo-icon { font-size: 1.5rem; }
+    .logo-sub  { color: var(--muted); font-size: 0.75rem; font-weight: 400; margin-top: 2px; }
+    .search-bar {
+      display: flex;
+      gap: 8px;
+      flex: 1;
+      max-width: 480px;
+    }
+    .search-bar input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      padding: 8px 12px;
+      outline: none;
+      transition: border-color .2s;
+    }
+    .search-bar input:focus { border-color: var(--accent); }
+    .search-bar button {
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 8px 16px;
+      transition: background .2s;
+    }
+    .search-bar button:hover { background: var(--accent2); }
+    .net-badge {
+      background: #1a1a2e;
+      border: 1px solid var(--accent);
+      border-radius: 20px;
+      color: var(--accent2);
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Layout ── */
+    main { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+    /* ── Stats strip ── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .stat-label { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .stat-value { font-size: 1.4rem; font-weight: 700; }
+    .stat-sub   { color: var(--muted); font-size: 0.75rem; margin-top: 4px; }
+    .green  { color: var(--green); }
+    .yellow { color: var(--yellow); }
+    .purple { color: var(--accent2); }
+
+    /* ── Two-column grid ── */
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+
+    /* ── Panel ── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .panel-header {
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+    }
+    .panel-title { font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+    .panel-body  { padding: 0; }
+
+    /* ── Block row ── */
+    .block-row {
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: 60px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 18px;
+      transition: background .15s;
+    }
+    .block-row:last-child { border-bottom: none; }
+    .block-row:hover { background: rgba(124,58,237,.08); }
+    .block-height {
+      background: rgba(124,58,237,.15);
+      border-radius: 8px;
+      color: var(--accent2);
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      font-weight: 700;
+      padding: 6px 8px;
+      text-align: center;
+    }
+    .block-hash  { color: var(--muted); font-family: var(--mono); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .block-meta  { color: var(--text); font-size: 0.8rem; }
+    .block-txs   { color: var(--muted); font-size: 0.7rem; }
+    .block-time  { color: var(--muted); font-size: 0.7rem; white-space: nowrap; }
+
+    /* ── Detail panel ── */
+    #detail {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-top: 24px;
+      display: none;
+    }
+    #detail.visible { display: block; }
+    .detail-header {
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+    }
+    .close-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.8rem;
+      padding: 4px 10px;
+    }
+    .close-btn:hover { border-color: var(--accent); color: var(--accent2); }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 0;
+    }
+    .kv-row {
+      border-bottom: 1px solid var(--border);
+      contents: '';
+    }
+    .kv-key, .kv-val {
+      padding: 10px 18px;
+      font-size: 0.82rem;
+    }
+    .kv-key { color: var(--muted); border-right: 1px solid var(--border); }
+    .kv-val { font-family: var(--mono); word-break: break-all; }
+
+    /* ── Peer list ── */
+    .peer-row {
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 18px;
+      font-size: 0.82rem;
+    }
+    .peer-row:last-child { border-bottom: none; }
+    .peer-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      flex-shrink: 0;
+    }
+    .empty { color: var(--muted); font-size: 0.82rem; padding: 18px; text-align: center; }
+
+    /* ── Live indicator ── */
+    .live {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--green);
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    .live-dot {
+      animation: pulse 2s ease-in-out infinite;
+      background: var(--green);
+      border-radius: 50%;
+      height: 7px;
+      width: 7px;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <span class="logo-icon">⚡</span>
+    <div>
+      <div>AXON Explorer</div>
+      <div class="logo-sub">Proof of Agent Work</div>
+    </div>
+  </div>
+  <div class="search-bar">
+    <input id="searchInput" type="text" placeholder="Search block height, hash, or address…" />
+    <button onclick="search()">Search</button>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="net-badge" id="netBadge">testnet</span>
+    <span class="live"><span class="live-dot"></span> LIVE</span>
+  </div>
+</header>
+
+<main>
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-label">Block Height</div>
+      <div class="stat-value purple" id="statHeight">—</div>
+      <div class="stat-sub" id="statHash">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Mempool</div>
+      <div class="stat-value yellow" id="statMempool">—</div>
+      <div class="stat-sub">unconfirmed txs</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Peers</div>
+      <div class="stat-value green" id="statPeers">—</div>
+      <div class="stat-sub">connected nodes</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Inference</div>
+      <div class="stat-value" id="statInference">—</div>
+      <div class="stat-sub" id="statInferenceSub">PoAW engine</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Min Relay Fee</div>
+      <div class="stat-value" id="statFee">—</div>
+      <div class="stat-sub">per transaction</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Network</div>
+      <div class="stat-value" id="statNetwork">—</div>
+      <div class="stat-sub">AXON (AXN)</div>
+    </div>
+  </div>
+
+  <!-- Blocks + Peers -->
+  <div class="grid2">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Latest Blocks</span>
+        <span class="live"><span class="live-dot"></span> auto-refresh</span>
+      </div>
+      <div class="panel-body" id="blockList"><div class="empty">Loading…</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Connected Peers</span>
+      </div>
+      <div class="panel-body" id="peerList"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- Detail -->
+  <div id="detail">
+    <div class="detail-header">
+      <span class="panel-title" id="detailTitle">Block Detail</span>
+      <button class="close-btn" onclick="closeDetail()">✕ Close</button>
+    </div>
+    <div class="kv-grid" id="detailBody"></div>
+  </div>
+</main>
+
+<script>
+const API = '';  // same origin
+
+// ── Fetch helpers ────────────────────────────────────────────────────────────
+
+async function get(path) {
+  try {
+    const r = await fetch(API + path);
+    return r.ok ? r.json() : null;
+  } catch { return null; }
+}
+
+// ── Formatting ───────────────────────────────────────────────────────────────
+
+function shortHash(h, n = 20) { return h ? h.slice(0, n) + '…' : '—'; }
+
+function timeAgo(ts) {
+  if (!ts) return '—';
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60)   return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+  return `${Math.floor(diff/3600)}h ago`;
+}
+
+function satToAXN(sat) {
+  if (sat === undefined || sat === null) return '—';
+  return (Number(sat) / 1e8).toFixed(8) + ' AXN';
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+
+async function refreshStatus() {
+  const s = await get('/status');
+  if (!s) return;
+
+  document.getElementById('statHeight').textContent   = s.height ?? '—';
+  document.getElementById('statHash').textContent     = shortHash(s.bestHash, 16);
+  document.getElementById('statMempool').textContent  = s.mempool ?? '—';
+  document.getElementById('statPeers').textContent    = s.peers ?? '—';
+  document.getElementById('statNetwork').textContent  = s.testnet ? 'Testnet' : 'Mainnet';
+  document.getElementById('netBadge').textContent     = s.testnet ? 'testnet' : 'mainnet';
+
+  const infReady = s.inferenceReady;
+  document.getElementById('statInference').textContent    = infReady ? '✅ Ready' : '⚠️ Sim';
+  document.getElementById('statInference').className      = 'stat-value ' + (infReady ? 'green' : 'yellow');
+  document.getElementById('statInferenceSub').textContent = infReady ? 'TinyLlama active' : 'simulation mode';
+  document.getElementById('statFee').textContent = s.minFee ?? '—';
+}
+
+// ── Block list ───────────────────────────────────────────────────────────────
+
+let currentHeight = 0;
+
+async function refreshBlocks() {
+  const s = await get('/status');
+  if (!s || s.height === currentHeight) return;
+  currentHeight = s.height;
+
+  const rows = [];
+  const from = Math.max(1, s.height - 9);
+  for (let h = s.height; h >= from; h--) {
+    const b = await get(`/block/${h}`);
+    if (!b) continue;
+    rows.push(`
+      <div class="block-row" onclick="showBlock(${h})">
+        <div class="block-height">#${h}</div>
+        <div>
+          <div class="block-hash">${b.hash ?? '—'}</div>
+          <div class="block-txs">${(b.transactions||[]).length} tx${(b.transactions||[]).length!==1?'s':''}</div>
+        </div>
+        <div class="block-time">${timeAgo(b.header?.timestamp)}</div>
+      </div>`);
+  }
+  document.getElementById('blockList').innerHTML = rows.join('') || '<div class="empty">No blocks yet</div>';
+}
+
+// ── Peers ────────────────────────────────────────────────────────────────────
+
+async function refreshPeers() {
+  const data = await get('/peers');
+  const peers = data?.peers ?? [];
+  if (!peers.length) {
+    document.getElementById('peerList').innerHTML = '<div class="empty">No connected peers</div>';
+    return;
+  }
+  document.getElementById('peerList').innerHTML = peers.map(p => `
+    <div class="peer-row">
+      <div class="peer-dot"></div>
+      <div>
+        <div>${p.address ?? '?'}</div>
+        <div style="color:var(--muted);font-size:0.7rem">height ${p.height ?? '?'} · v${p.version ?? '?'}</div>
+      </div>
+    </div>`).join('');
+}
+
+// ── Block detail ─────────────────────────────────────────────────────────────
+
+async function showBlock(height) {
+  const b = await get(`/block/${height}`);
+  if (!b) return;
+
+  document.getElementById('detailTitle').textContent = `Block #${height}`;
+  const kvs = [
+    ['Height',       height],
+    ['Hash',         b.hash ?? '—'],
+    ['Prev Hash',    b.header?.prevHash ?? '—'],
+    ['Merkle Root',  b.header?.merkleRoot ?? '—'],
+    ['Timestamp',    b.header?.timestamp ? new Date(b.header.timestamp * 1000).toISOString() : '—'],
+    ['Transactions', (b.transactions ?? []).length],
+    ['Miner',        b.header?.minerAddress ?? '—'],
+    ['Inference Hash', b.header?.inferenceHash ?? '—'],
+    ['PoW Nonce',    b.header?.powNonce ?? '—'],
+    ['PoAW Nonce',   b.header?.poawNonce ?? '—'],
+  ];
+
+  document.getElementById('detailBody').innerHTML = kvs.map(([k,v]) => `
+    <div class="kv-key">${k}</div>
+    <div class="kv-val">${v}</div>`).join('');
+
+  const el = document.getElementById('detail');
+  el.classList.add('visible');
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeDetail() {
+  document.getElementById('detail').classList.remove('visible');
+}
+
+// ── Search ───────────────────────────────────────────────────────────────────
+
+async function search() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+
+  // Height (number)
+  if (/^\d+$/.test(q)) {
+    return showBlock(parseInt(q));
+  }
+
+  // Address (axon1...)
+  if (q.startsWith('axon1')) {
+    const data = await get(`/balance/${q}`);
+    if (data) {
+      document.getElementById('detailTitle').textContent = `Address: ${q}`;
+      const kvs = [
+        ['Address',  q],
+        ['Balance',  satToAXN(data.confirmed)],
+        ['UTXOs',    (data.utxos ?? []).length],
+      ];
+      document.getElementById('detailBody').innerHTML = kvs.map(([k,v]) => `
+        <div class="kv-key">${k}</div>
+        <div class="kv-val">${v}</div>`).join('');
+      document.getElementById('detail').classList.add('visible');
+    }
+    return;
+  }
+
+  // Block hash (64 hex chars)
+  if (/^[0-9a-f]{64}$/.test(q)) {
+    // Try to find height from recent blocks
+    const s = await get('/status');
+    if (s) {
+      for (let h = s.height; h >= Math.max(1, s.height - 100); h--) {
+        const b = await get(`/block/${h}`);
+        if (b && b.hash === q) return showBlock(h);
+      }
+    }
+    alert('Block not found in recent 100 blocks.');
+    return;
+  }
+
+  alert('Enter a block height, address (axon1…), or block hash.');
+}
+
+document.getElementById('searchInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') search();
+});
+
+// ── Auto-refresh ─────────────────────────────────────────────────────────────
+
+async function refresh() {
+  await Promise.all([refreshStatus(), refreshBlocks(), refreshPeers()]);
+}
+
+refresh();
+setInterval(refresh, 5000);  // every 5 seconds
+</script>
+</body>
+</html>

@@ -12,9 +12,9 @@ import { mineBlock }             from './mining/miner';
 import { isInferenceReady, verifyModelHash } from './mining/inference';
 import { keypairFromSeed, keypairFromMnemonic, formatAXN } from './wallet/wallet';
 import { getBlockReward, hashTx, addressToScript } from './blockchain/block';
-// RPC_PORT imported from constants as fallback default only
 import { Transaction }           from './blockchain/types';
 import { P2PServer }             from './p2p/server';
+import { MempoolStore }          from './blockchain/mempool';
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
@@ -32,23 +32,23 @@ const MIN_RELAY_FEE = 1_000n; // satoshis
 
 // ─── MEMPOOL ─────────────────────────────────────────────────────────────────
 
-const mempool = new Map<string, { tx: Transaction; fee: bigint; addedAt: number }>();
+// Instantiated after CHAIN_DIR is known — see main()
+let mempool: MempoolStore;
 
-function mempoolSize(): number { return mempool.size; }
+function mempoolSize(): number { return mempool.size(); }
 
-function addToMempool(tx: Transaction, fee: bigint): { ok: boolean; error?: string } {
+async function addToMempool(tx: Transaction, fee: bigint): Promise<{ ok: boolean; error?: string }> {
   if (fee < MIN_RELAY_FEE) {
     return { ok: false, error: `Fee ${fee} below minimum relay fee ${MIN_RELAY_FEE}` };
   }
   const txid = hashTx(tx);
   tx.txid    = txid;
   if (mempool.has(txid)) return { ok: false, error: 'Already in mempool' };
-  mempool.set(txid, { tx, fee, addedAt: Date.now() });
+  await mempool.add(txid, { tx, fee, addedAt: Date.now() });
   return { ok: true };
 }
 
 function getTopTxs(maxBytes = 1_000_000): Transaction[] {
-  // Sort by fee-per-byte descending, fill up to maxBytes
   const sorted = [...mempool.values()].sort((a, b) =>
     Number(b.fee - a.fee)
   );
@@ -69,6 +69,14 @@ async function main() {
   const chain  = await openChain(TESTNET, CHAIN_DIR);
   const wallet = keypairFromSeed(MINER_SEED);
   let   mining = false;
+
+  // Init persistent mempool (same dir as chain data)
+  mempool = new MempoolStore(CHAIN_DIR, !!CHAIN_DIR);
+  await mempool.open();
+
+  // Evict stale txs on startup (older than 72h)
+  const evicted = await mempool.evictStale();
+  if (evicted > 0) console.log(`[Mempool] Evicted ${evicted} stale tx(s) on startup`);
 
   console.log('\n⚡ AXON Node');
   console.log(`   Network:  ${TESTNET ? 'testnet' : 'mainnet'}`);
@@ -139,18 +147,26 @@ async function main() {
   app.get('/status', (req, res) => {
     const state = chain.getState();
     res.json({
-      version:      '0.4.0',
-      network:      TESTNET ? 'testnet' : 'mainnet',
-      height:       state.height,
-      bestHash:     state.bestBlockHash,
-      powTarget:    state.powTarget.substring(0, 16) + '...',
-      poawTarget:   state.poawTarget.substring(0, 16) + '...',
-      miner:        wallet.address,
-      peers:        p2p.getPeerCount(),
-      mempool:      mempoolSize(),
-      minRelayFee:  formatAXN(MIN_RELAY_FEE),
+      version:        '0.9.0',
+      network:        TESTNET ? 'testnet' : 'mainnet',
+      testnet:        TESTNET,
+      height:         state.height,
+      bestHash:       state.bestBlockHash,
+      powTarget:      state.powTarget.substring(0, 16) + '...',
+      poawTarget:     state.poawTarget.substring(0, 16) + '...',
+      miner:          wallet.address,
+      peers:          p2p.getPeerCount(),
+      mempool:        mempoolSize(),
+      minFee:         formatAXN(MIN_RELAY_FEE),
+      minRelayFee:    formatAXN(MIN_RELAY_FEE),
+      inferenceReady: isInferenceReady(),
       mining,
     });
+  });
+
+  // GET /explorer — block explorer UI
+  app.get('/explorer', (req, res) => {
+    res.sendFile(require('path').join(__dirname, 'explorer', 'index.html'));
   });
 
   // GET /block/:height
@@ -208,8 +224,8 @@ async function main() {
   // GET /mempool
   app.get('/mempool', (req, res) => {
     res.json({
-      count: mempool.size,
-      txids: [...mempool.keys()],
+      count:     mempool.size(),
+      txids:     [...mempool.keys()],
       totalFees: formatAXN([...mempool.values()].reduce((s, e) => s + e.fee, 0n)),
     });
   });
@@ -230,7 +246,7 @@ async function main() {
   });
 
   // POST /tx — broadcast a transaction
-  app.post('/tx', txLimiter, (req, res) => {
+  app.post('/tx', txLimiter, async (req, res) => {
     const tx: Transaction = req.body;
     if (!tx || !tx.inputs || !tx.outputs) {
       return res.status(400).json({ error: 'Invalid transaction format' });
@@ -248,7 +264,7 @@ async function main() {
       });
     }
 
-    const result = addToMempool(tx, fee);
+    const result = await addToMempool(tx, fee);
     if (!result.ok) return res.status(400).json({ error: result.error });
 
     // Broadcast to peers
@@ -270,9 +286,8 @@ async function main() {
       if (!added.success) return res.status(400).json({ error: added.error });
 
       // Clear included txs from mempool
-      for (const tx of txs) {
-        if (tx.txid) mempool.delete(tx.txid);
-      }
+      const confirmedTxids = txs.map(tx => tx.txid).filter(Boolean) as string[];
+      await mempool.confirmBlock(confirmedTxids);
 
       // Broadcast to peers
       p2p.broadcastBlock(result.block);
@@ -315,3 +330,13 @@ main().catch(err => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
+
+// Graceful shutdown
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+async function shutdown(signal: string) {
+  console.log(`\n[AXON] ${signal} received — shutting down gracefully...`);
+  try { await mempool.close(); } catch {}
+  process.exit(0);
+}
