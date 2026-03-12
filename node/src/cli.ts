@@ -231,6 +231,55 @@ async function cmdInfo() {
   console.log('  ... approaches 21,000,000 AXN asymptotically\n');
 }
 
+async function cmdSetupInference() {
+  banner();
+  const { getInferenceStatus, benchmarkInference, computeModelHash } = await import('./mining/inference');
+
+  console.log('  Checking inference setup...\n');
+  const status = getInferenceStatus();
+
+  console.log(`  llama-cli:  ${status.llamaCli}`);
+  console.log(`  Status:     ${status.llamaExists ? '✅ found' : '❌ MISSING'}`);
+  console.log(`  Model path: ${status.modelPath}`);
+  console.log(`  Status:     ${status.modelExists ? '✅ found' : '❌ MISSING'}\n`);
+
+  if (!status.llamaExists) {
+    console.log('  Build llama.cpp:');
+    console.log('    git clone --depth 1 https://github.com/ggml-org/llama.cpp /tmp/llama.cpp');
+    console.log('    cd /tmp/llama.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF');
+    console.log('    cmake --build build -j$(nproc)');
+    console.log('  Then set: export LLAMA_CLI=/tmp/llama.cpp/build/bin/llama-cli\n');
+  }
+
+  if (!status.modelExists) {
+    const modelDir = require('path').dirname(status.modelPath);
+    require('fs').mkdirSync(modelDir, { recursive: true });
+    console.log('  Download TinyLlama model (~669MB):');
+    console.log(`    mkdir -p ${modelDir}`);
+    console.log(`    cd ${modelDir}`);
+    console.log('    wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf');
+    console.log('  Or: curl -L -o ' + status.modelPath + ' \\');
+    console.log('    https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf\n');
+  }
+
+  if (status.ready) {
+    console.log('  ✅ All systems ready. Running benchmark...\n');
+    try {
+      const bench = await benchmarkInference();
+      console.log(`  Inference speed:  ${bench.tokensPerSecond} tokens/sec`);
+      console.log(`  Time per block:   ${(bench.inferenceMs / 1000).toFixed(1)}s`);
+      console.log(`  Output hash:      ${bench.hash.substring(0, 32)}...`);
+      const modelHash = await computeModelHash();
+      console.log(`  Model SHA256:     ${modelHash}`);
+      console.log('\n  ✅ Real inference working. Mining will use TinyLlama automatically.\n');
+    } catch (e: any) {
+      console.log(`  ❌ Benchmark failed: ${e.message}\n`);
+    }
+  } else {
+    console.log('  ⚠️  Setup incomplete. Mining will use simulation until inference is ready.\n');
+  }
+}
+
 async function cmdHelp() {
   banner();
   console.log('  Commands:');
@@ -242,6 +291,7 @@ async function cmdHelp() {
   console.log('  axon mine [n]               Mine n blocks (default: 1)');
   console.log('  axon mine [n] --address X   Mine to specific address');
   console.log('  axon info                   Protocol info + issuance schedule');
+  console.log('  axon setup-inference        Check/setup real TinyLlama inference');
   console.log('  axon test                   Run full test suite');
   console.log('  axon help                   Show this help\n');
   console.log('  Security:');
@@ -271,6 +321,7 @@ async function main() {
       const addr    = addrIdx !== -1 ? args[addrIdx + 1] : undefined;
       return cmdMine(n, addr);
     }
+    case 'setup-inference': return cmdSetupInference();
     case 'test': {
       const { execSync } = require('child_process');
       execSync('npx ts-node src/test/suite.ts', { stdio: 'inherit', cwd: __dirname + '/..' });
