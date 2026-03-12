@@ -383,6 +383,58 @@ async function testWallet() {
   });
 }
 
+// ─── WALLET ENCRYPTION TESTS ─────────────────────────────────────────────────
+
+async function testWalletEncryption() {
+  console.log('\n🔐 Wallet Encryption Tests:');
+  const nodeCrypto = require('crypto') as typeof import('crypto');
+
+  function encryptMnemonic(mnemonic: string, passphrase: string): { encrypted: string; salt: string; N: number; r: number; p: number } {
+    const salt   = nodeCrypto.randomBytes(32);
+    const N = 1024, r = 8, p = 1; // low N for tests; production uses N=32768
+    const key    = nodeCrypto.scryptSync(passphrase, salt, 32, { N, r, p });
+    const iv     = nodeCrypto.randomBytes(12);
+    const cipher = nodeCrypto.createCipheriv('aes-256-gcm', key, iv);
+    const ct     = Buffer.concat([cipher.update(mnemonic, 'utf8'), cipher.final()]);
+    const tag    = cipher.getAuthTag();
+    return { encrypted: Buffer.concat([iv, tag, ct]).toString('hex'), salt: salt.toString('hex'), N, r, p };
+  }
+
+  function decryptMnemonic(encrypted: string, salt: string, N: number, r: number, p: number, passphrase: string): string {
+    const buf      = Buffer.from(encrypted, 'hex');
+    const iv       = buf.slice(0, 12);
+    const tag      = buf.slice(12, 28);
+    const ct       = buf.slice(28);
+    const saltBuf  = Buffer.from(salt, 'hex');
+    const key      = nodeCrypto.scryptSync(passphrase, saltBuf, 32, { N, r, p });
+    const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return decipher.update(ct) + decipher.final('utf8');
+  }
+
+  const testMnemonic = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+
+  await test('Encrypted wallet decrypts correctly with right passphrase', () => {
+    const { encrypted, salt, N, r, p } = encryptMnemonic(testMnemonic, 'correct-horse');
+    const decrypted = decryptMnemonic(encrypted, salt, N, r, p, 'correct-horse');
+    assertEqual(decrypted, testMnemonic, 'Decrypted mnemonic should match original');
+  });
+
+  await test('Encrypted wallet fails with wrong passphrase', () => {
+    const { encrypted, salt, N, r, p } = encryptMnemonic(testMnemonic, 'correct-horse');
+    let threw = false;
+    try { decryptMnemonic(encrypted, salt, N, r, p, 'wrong-passphrase'); }
+    catch { threw = true; }
+    assert(threw, 'Wrong passphrase should throw (GCM auth tag failure)');
+  });
+
+  await test('Two encryptions of same mnemonic produce different ciphertext (random IV+salt)', () => {
+    const a = encryptMnemonic(testMnemonic, 'pass').encrypted;
+    const b = encryptMnemonic(testMnemonic, 'pass').encrypted;
+    assert(a !== b, 'Each encryption should be unique due to random IV and salt');
+  });
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -395,6 +447,7 @@ async function main() {
   await testPoaw();
   await testBlockValidation();
   await testWallet();
+  await testWalletEncryption();
 
   console.log('\n' + '═'.repeat(54));
   console.log(`Results: ${passed} passed, ${failed} failed`);

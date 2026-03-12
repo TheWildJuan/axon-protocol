@@ -14,6 +14,7 @@ import * as path     from 'path';
 import * as fs       from 'fs';
 import * as crypto   from 'crypto';
 import { sha256d }   from '../blockchain/crypto';
+import { CANONICAL_MODEL } from '../blockchain/constants';
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
@@ -154,7 +155,7 @@ export async function benchmarkInference(): Promise<{
 
 /**
  * Compute SHA256 of the model file.
- * This must match the value pinned in genesis block.
+ * This must match the value pinned in genesis block (CANONICAL_MODEL.sha256).
  */
 export async function computeModelHash(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -164,4 +165,19 @@ export async function computeModelHash(): Promise<string> {
     stream.on('end',  ()    => resolve(hash.digest('hex')));
     stream.on('error', reject);
   });
+}
+
+/**
+ * Verify the loaded model matches the canonical model pinned in the protocol.
+ * Returns { valid, actual, expected }.
+ * Should be called at node startup before mining begins.
+ */
+export async function verifyModelHash(): Promise<{
+  valid:    boolean;
+  actual:   string;
+  expected: string;
+}> {
+  const expected = CANONICAL_MODEL.sha256;
+  const actual   = await computeModelHash();
+  return { valid: actual === expected, actual, expected };
 }

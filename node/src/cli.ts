@@ -7,6 +7,7 @@
 import * as readline from 'readline';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { generateWallet, keypairFromMnemonic, validateMnemonic, formatAXN } from './wallet/wallet';
 import { Blockchain, openChain } from './blockchain/chain';
 import { mineBlock } from './mining/miner';
@@ -22,10 +23,55 @@ function ensureDir(p: string) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-interface WalletFile {
+interface WalletFilePlain {
+  version:  1;
   address:  string;
   mnemonic: string;
   path:     string;
+}
+
+interface WalletFileEncrypted {
+  version:   2;
+  address:   string;           // plaintext — so you can see your address without decrypting
+  path:      string;
+  encrypted: string;           // hex: iv(12) + tag(16) + ciphertext
+  kdf:       'scrypt';
+  kdfParams: { N: number; r: number; p: number; salt: string };
+}
+
+type WalletFile = WalletFilePlain | WalletFileEncrypted;
+
+// ─── ENCRYPTION HELPERS ─────────────────────────────────────────────────────
+
+function encryptWallet(mnemonic: string, passphrase: string): {
+  encrypted: string;
+  kdfParams: WalletFileEncrypted['kdfParams'];
+} {
+  const salt    = crypto.randomBytes(32);
+  const N = 32768, r = 8, p = 1;
+  const key     = crypto.scryptSync(passphrase, salt, 32, { N, r, p });
+  const iv      = crypto.randomBytes(12);
+  const cipher  = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct      = Buffer.concat([cipher.update(mnemonic, 'utf8'), cipher.final()]);
+  const tag     = cipher.getAuthTag();
+  // packed: iv(12) + tag(16) + ciphertext
+  const packed  = Buffer.concat([iv, tag, ct]).toString('hex');
+  return {
+    encrypted: packed,
+    kdfParams: { N, r, p, salt: salt.toString('hex') },
+  };
+}
+
+function decryptWallet(encrypted: string, kdfParams: WalletFileEncrypted['kdfParams'], passphrase: string): string {
+  const buf    = Buffer.from(encrypted, 'hex');
+  const iv     = buf.slice(0, 12);
+  const tag    = buf.slice(12, 28);
+  const ct     = buf.slice(28);
+  const salt   = Buffer.from(kdfParams.salt, 'hex');
+  const key    = crypto.scryptSync(passphrase, salt, 32, { N: kdfParams.N, r: kdfParams.r, p: kdfParams.p });
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return decipher.update(ct) + decipher.final('utf8');
 }
 
 function loadWallet(): WalletFile | null {
@@ -33,14 +79,27 @@ function loadWallet(): WalletFile | null {
   return JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
 }
 
-function saveWallet(address: string, mnemonic: string) {
+function saveWallet(address: string, mnemonic: string, passphrase?: string) {
   ensureDir(WALLET_FILE);
-  const data: WalletFile = {
-    address,
-    mnemonic,
-    path: `m/44'/7777'/0'/0/0`,
-  };
+  let data: WalletFile;
+  if (passphrase) {
+    const { encrypted, kdfParams } = encryptWallet(mnemonic, passphrase);
+    data = { version: 2, address, path: `m/44'/7777'/0'/0/0`, encrypted, kdf: 'scrypt', kdfParams };
+  } else {
+    data = { version: 1, address, mnemonic, path: `m/44'/7777'/0'/0/0` };
+  }
   fs.writeFileSync(WALLET_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
+}
+
+async function loadDecryptedMnemonic(wallet: WalletFile): Promise<string> {
+  if (wallet.version === 1) return (wallet as WalletFilePlain).mnemonic;
+  const enc = wallet as WalletFileEncrypted;
+  const passphrase = await ask('Wallet passphrase: ');
+  try {
+    return decryptWallet(enc.encrypted, enc.kdfParams, passphrase);
+  } catch {
+    throw new Error('Wrong passphrase or corrupted wallet file.');
+  }
 }
 
 function banner() {
@@ -91,8 +150,19 @@ async function cmdNew() {
 
   const save = await ask('Save wallet to ~/.axon/wallet.json? (y/n): ');
   if (save.toLowerCase() === 'y') {
-    saveWallet(keypair.address, mnemonic);
-    console.log(`\n✅ Wallet saved (chmod 600): ${WALLET_FILE}`);
+    const usePass = await ask('Encrypt with passphrase? (recommended) (y/n): ');
+    let passphrase: string | undefined;
+    if (usePass.toLowerCase() === 'y') {
+      passphrase = await ask('Enter passphrase: ');
+      const confirm = await ask('Confirm passphrase: ');
+      if (passphrase !== confirm) {
+        console.log('\n❌ Passphrases do not match. Wallet NOT saved.\n');
+        process.exit(1);
+      }
+    }
+    saveWallet(keypair.address, mnemonic, passphrase);
+    const encTag = passphrase ? ' (AES-256-GCM encrypted)' : ' (unencrypted — consider using a passphrase)';
+    console.log(`\n✅ Wallet saved (chmod 600): ${WALLET_FILE}${encTag}`);
     console.log(`   Address: ${keypair.address}\n`);
   } else {
     console.log('\n⚠️  Wallet NOT saved. Write down your mnemonic before closing.\n');
@@ -116,8 +186,19 @@ async function cmdRestore() {
 
   const save = await ask('\nSave to ~/.axon/wallet.json? (y/n): ');
   if (save.toLowerCase() === 'y') {
-    saveWallet(keypair.address, mnemonic);
-    console.log(`✅ Saved: ${WALLET_FILE}\n`);
+    const usePass = await ask('Encrypt with passphrase? (recommended) (y/n): ');
+    let passphrase: string | undefined;
+    if (usePass.toLowerCase() === 'y') {
+      passphrase = await ask('Enter passphrase: ');
+      const confirm = await ask('Confirm passphrase: ');
+      if (passphrase !== confirm) {
+        console.log('\n❌ Passphrases do not match. Wallet NOT saved.\n');
+        process.exit(1);
+      }
+    }
+    saveWallet(keypair.address, mnemonic, passphrase);
+    const encTag = passphrase ? ' (encrypted)' : '';
+    console.log(`✅ Saved${encTag}: ${WALLET_FILE}\n`);
   }
 }
 

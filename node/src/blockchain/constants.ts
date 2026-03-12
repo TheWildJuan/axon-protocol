@@ -14,11 +14,12 @@ export const AUDIT_WINDOW = 100;               // blocks subject to audit challe
 export const GENESIS_TIMESTAMP = Math.floor(new Date('2026-03-12T00:00:00Z').getTime() / 1000);
 
 // Canonical model pinned in genesis
+// SHA256 verified: sha256sum ~/.axon/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 export const CANONICAL_MODEL = {
-  name: 'TinyLlama-1.1B-Chat-v1.0-Q4_K_M',
-  sha256: 'be640a18768e4494c02a91577f9aab77948e9571e00b28b5568de8b1e96f2083', // placeholder
-  size_bytes: 668_621_824,
-  hf_repo: 'TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF',
+  name:       'TinyLlama-1.1B-Chat-v1.0-Q4_K_M',
+  sha256:     '9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0',
+  size_bytes: 638_957_696,  // 638MB actual on disk
+  hf_repo:    'TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF',
 };
 
 // Initial difficulty targets (testnet — easy for simulation)

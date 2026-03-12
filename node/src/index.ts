@@ -9,6 +9,7 @@ import * as net    from 'net';
 import rateLimit   from 'express-rate-limit';
 import { openChain, Blockchain } from './blockchain/chain';
 import { mineBlock }             from './mining/miner';
+import { isInferenceReady, verifyModelHash } from './mining/inference';
 import { keypairFromSeed, keypairFromMnemonic, formatAXN } from './wallet/wallet';
 import { getBlockReward, hashTx, addressToScript } from './blockchain/block';
 // RPC_PORT imported from constants as fallback default only
@@ -76,6 +77,27 @@ async function main() {
   console.log(`   RPC:      http://${RPC_HOST}:${RPC_PORT}`);
   console.log(`   P2P:      0.0.0.0:${P2P_PORT}`);
   console.log(`   Min fee:  ${formatAXN(MIN_RELAY_FEE)}/tx\n`);
+
+  // ─── MODEL HASH VERIFICATION ─────────────────────────────────────────────
+
+  if (isInferenceReady()) {
+    console.log('[AXON] Verifying canonical model hash...');
+    const modelCheck = await verifyModelHash();
+    if (modelCheck.valid) {
+      console.log(`[AXON] ✅ Model hash verified: ${modelCheck.actual.substring(0, 16)}...`);
+    } else {
+      console.warn(`[AXON] ⚠️  Model hash MISMATCH!`);
+      console.warn(`[AXON]    Expected: ${modelCheck.expected}`);
+      console.warn(`[AXON]    Actual:   ${modelCheck.actual}`);
+      if (!TESTNET) {
+        console.error('[AXON] ❌ Mainnet requires canonical model. Refusing to mine.');
+        process.exit(1);
+      }
+      console.warn('[AXON]    Testnet mode — continuing with non-canonical model.');
+    }
+  } else {
+    console.log('[AXON] ℹ️  Inference not ready — PoAW will use simulation fallback.');
+  }
 
   // ─── P2P SERVER ─────────────────────────────────────────────────────────────
 
