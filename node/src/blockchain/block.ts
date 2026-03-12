@@ -258,7 +258,7 @@ export function validateBlock(
   height:      number,
   powTarget:   string,
   poawTarget:  string,
-  utxoLookup:  (txid: string, index: number) => { value: bigint; scriptPubKey: string } | null,
+  utxoLookup:  (txid: string, index: number) => { value: bigint; scriptPubKey: string; coinbase: boolean; blockHeight: number } | null,
 ): ValidationResult {
 
   // 1. PoW check
@@ -312,9 +312,18 @@ export function validateBlock(
       const inp  = tx.inputs[i];
       const utxo = utxoLookup(inp.prevTxid, inp.prevIndex);
       if (utxo === null) return { valid: false, error: `Unknown UTXO: ${inp.prevTxid}:${inp.prevIndex}` };
+
+      // 8a. Coinbase maturity check
+      if (utxo.coinbase) {
+        const age = height - utxo.blockHeight;
+        if (age < COINBASE_MATURITY) {
+          return { valid: false, error: `Coinbase UTXO immature: age ${age} < required ${COINBASE_MATURITY}` };
+        }
+      }
+
       inputSum += utxo.value;
 
-      // 8. Signature verification (P2PKH)
+      // 8b. Signature verification (P2PKH)
       const sigHash = txSigHash(tx, i, utxo.scriptPubKey);
       if (!verifyScriptSig(inp.scriptSig, utxo.scriptPubKey, sigHash)) {
         return { valid: false, error: `Invalid signature on tx ${tx.txid ?? t} input ${i}` };

@@ -13,6 +13,15 @@ export const AUDIT_WINDOW = 100;               // blocks subject to audit challe
 // Genesis block timestamp
 export const GENESIS_TIMESTAMP = Math.floor(new Date('2026-03-12T00:00:00Z').getTime() / 1000);
 
+// Genesis message embedded in coinbase scriptSig
+export const GENESIS_MESSAGE = 'Mine with intelligence, not just electricity. AXON 2026-03-12';
+
+// Genesis block hash — set to '0'.repeat(64) during initial computation, then hardcoded
+// Run: npx ts-node src/tools/compute-genesis.ts  to compute and update this value
+// Computed by: npx ts-node src/tools/compute-genesis.ts
+// DO NOT CHANGE after mainnet launch — this locks in chain identity
+export const GENESIS_HASH = 'f42f19b75d4d94520c4984e715a1703c8216b56fd49d737f36d2678bcf5ae22f';
+
 // Canonical model pinned in genesis
 // SHA256 verified: sha256sum ~/.axon/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 export const CANONICAL_MODEL = {
@@ -31,6 +40,16 @@ export const TESTNET_POAW_TARGET = '0fffffffffffffffffffffffffffffffffffffffffff
 export const NETWORK_MAGIC = Buffer.from('AXON', 'ascii');
 export const DEFAULT_PORT = 8333;
 export const RPC_PORT = 8332;
+
+// Hardcoded checkpoints — height → expected block hash.
+// Prevents long-range reorg attacks on a young chain.
+// Add entries after mainnet is live and chain has sufficient depth.
+// Format: [height, hash]
+export const CHECKPOINTS: Array<[number, string]> = [
+  // Genesis is always implicitly checked via GENESIS_HASH
+  // [1000,  'add-after-mainnet-launch'],
+  // [10000, 'add-after-mainnet-launch'],
+];
 
 // DNS seed hostnames — these resolve to IPs of stable seed nodes.
 // Add your own public node here when launching mainnet.

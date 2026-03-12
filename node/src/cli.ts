@@ -333,14 +333,46 @@ async function cmdSetupInference() {
   }
 
   if (!status.modelExists) {
-    const modelDir = require('path').dirname(status.modelPath);
-    require('fs').mkdirSync(modelDir, { recursive: true });
-    console.log('  Download TinyLlama model (~669MB):');
-    console.log(`    mkdir -p ${modelDir}`);
-    console.log(`    cd ${modelDir}`);
-    console.log('    wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf');
-    console.log('  Or: curl -L -o ' + status.modelPath + ' \\');
-    console.log('    https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf\n');
+    const nodePath   = require('path');
+    const nodeFs     = require('fs');
+    const nodeChild  = require('child_process');
+    const modelDir   = nodePath.dirname(status.modelPath);
+    nodeFs.mkdirSync(modelDir, { recursive: true });
+
+    const MODEL_URL = 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
+    const { CANONICAL_MODEL } = require('./blockchain/constants');
+
+    console.log(`  Model not found. Download now? (~639MB)\n  URL: ${MODEL_URL}\n`);
+    const doDownload = await ask('  Download automatically? (y/n): ');
+    if (doDownload.toLowerCase() === 'y') {
+      console.log('\n  Downloading... (this may take several minutes)\n');
+      try {
+        // Use wget or curl, whichever is available
+        const downloader = (() => {
+          try { nodeChild.execSync('which wget', { stdio: 'pipe' }); return 'wget'; }
+          catch { return 'curl'; }
+        })();
+        const cmd = downloader === 'wget'
+          ? `wget --progress=dot:mega -O "${status.modelPath}" "${MODEL_URL}"`
+          : `curl -L --progress-bar -o "${status.modelPath}" "${MODEL_URL}"`;
+        nodeChild.execSync(cmd, { stdio: 'inherit' });
+        console.log('\n  Download complete. Verifying SHA256...\n');
+        const actualHash = await computeModelHash();
+        if (actualHash === CANONICAL_MODEL.sha256) {
+          console.log(`  ✅ Model verified: ${actualHash.substring(0, 32)}...\n`);
+        } else {
+          console.log(`  ❌ Hash mismatch! Expected: ${CANONICAL_MODEL.sha256}`);
+          console.log(`                   Got:      ${actualHash}`);
+          console.log('  Deleting corrupt download.\n');
+          nodeFs.unlinkSync(status.modelPath);
+        }
+      } catch (e: any) {
+        console.log(`  ❌ Download failed: ${e.message}\n`);
+      }
+    } else {
+      console.log('\n  Manual download:');
+      console.log(`    wget -O "${status.modelPath}" "${MODEL_URL}"\n`);
+    }
   }
 
   if (status.ready) {
@@ -350,8 +382,11 @@ async function cmdSetupInference() {
       console.log(`  Inference speed:  ${bench.tokensPerSecond} tokens/sec`);
       console.log(`  Time per block:   ${(bench.inferenceMs / 1000).toFixed(1)}s`);
       console.log(`  Output hash:      ${bench.hash.substring(0, 32)}...`);
+      const { CANONICAL_MODEL } = require('./blockchain/constants');
       const modelHash = await computeModelHash();
+      const hashOK    = modelHash === CANONICAL_MODEL.sha256;
       console.log(`  Model SHA256:     ${modelHash}`);
+      console.log(`  Hash verified:    ${hashOK ? '✅ matches canonical' : '❌ MISMATCH — not canonical model!'}`);
       console.log('\n  ✅ Real inference working. Mining will use TinyLlama automatically.\n');
     } catch (e: any) {
       console.log(`  ❌ Benchmark failed: ${e.message}\n`);
@@ -361,20 +396,151 @@ async function cmdSetupInference() {
   }
 }
 
+async function cmdSend(toAddress: string, amountAXN: string, feeAXN?: string) {
+  banner();
+
+  // ── 1. Load wallet & decrypt ──────────────────────────────────────────────
+  const walletFile = loadWallet();
+  if (!walletFile) {
+    console.log('\n❌ No wallet found. Run: axon new\n');
+    process.exit(1);
+  }
+  let mnemonic: string;
+  try {
+    mnemonic = await loadDecryptedMnemonic(walletFile);
+  } catch (e: any) {
+    console.log(`\n❌ ${e.message}\n`);
+    process.exit(1);
+  }
+  const { keypairFromMnemonic: kfm } = require('./wallet/wallet');
+  const keypair = kfm(mnemonic);
+
+  // ── 2. Parse amounts ──────────────────────────────────────────────────────
+  const COIN_UNIT = 100_000_000n;
+  const parseSat = (s: string) => BigInt(Math.round(parseFloat(s) * 1e8));
+  const sendSats = parseSat(amountAXN);
+  const feeSats  = feeAXN ? parseSat(feeAXN) : 10_000n; // default 0.0001 AXN fee
+  const needed   = sendSats + feeSats;
+
+  if (sendSats <= 0n) { console.log('\n❌ Amount must be positive\n'); process.exit(1); }
+
+  const { formatAXN: fmt } = require('./wallet/wallet');
+  console.log(`\nSending ${fmt(sendSats)} AXN → ${toAddress}`);
+  console.log(`Fee:    ${fmt(feeSats)} AXN`);
+  console.log(`Total:  ${fmt(needed)} AXN\n`);
+
+  // ── 3. Fetch UTXOs from RPC ───────────────────────────────────────────────
+  const RPC = process.env.RPC_URL || `http://127.0.0.1:${RPC_PORT_DEFAULT}`;
+  let utxos: Array<{ txid: string; index: number; value: string; scriptPubKey: string }>;
+  try {
+    const res = await fetch(`${RPC}/utxos/${walletFile.address}`);
+    if (!res.ok) throw new Error(`RPC error: ${res.status}`);
+    const data: any = await res.json();
+    utxos = data.utxos ?? [];
+  } catch (e: any) {
+    console.log(`❌ Could not reach RPC at ${RPC}: ${e.message}`);
+    console.log('   Start a node with: axon mine 0 (or run index.ts)\n');
+    process.exit(1);
+  }
+
+  // ── 4. Coin selection (largest-first greedy) ──────────────────────────────
+  const available = utxos.map(u => ({ ...u, valueSat: BigInt(u.value) }))
+    .sort((a, b) => (b.valueSat > a.valueSat ? 1 : -1));
+
+  const selected: typeof available = [];
+  let   collected = 0n;
+  for (const u of available) {
+    selected.push(u);
+    collected += u.valueSat;
+    if (collected >= needed) break;
+  }
+
+  if (collected < needed) {
+    const bal = available.reduce((s, u) => s + u.valueSat, 0n);
+    console.log(`❌ Insufficient balance. Have ${fmt(bal)} AXN, need ${fmt(needed)} AXN\n`);
+    process.exit(1);
+  }
+
+  const change = collected - needed;
+
+  // ── 5. Build transaction ──────────────────────────────────────────────────
+  const { addressToScript } = require('./blockchain/block');
+  const outputs: Array<{ value: bigint; scriptPubKey: string }> = [
+    { value: sendSats, scriptPubKey: addressToScript(toAddress) },
+  ];
+  if (change > 546n) { // dust threshold
+    outputs.push({ value: change, scriptPubKey: addressToScript(walletFile.address) });
+  }
+
+  const tx: any = {
+    version:  1,
+    inputs:   selected.map(u => ({ prevTxid: u.txid, prevIndex: u.index, scriptSig: '', sequence: 0xffffffff })),
+    outputs,
+    locktime: 0,
+  };
+
+  // ── 6. Sign all inputs ────────────────────────────────────────────────────
+  const { txSigHash, verifyScriptSig } = require('./blockchain/block');
+  const { signTx: sign, buildScriptSig: bss } = require('./wallet/wallet');
+  for (let i = 0; i < tx.inputs.length; i++) {
+    const utxo   = selected[i];
+    const sighash = txSigHash(tx, i, utxo.scriptPubKey);
+    const sigHex  = sign(sighash, keypair.privateKeyHex);
+    tx.inputs[i].scriptSig = bss(sigHex, keypair.publicKeyHex);
+  }
+
+  // ── 7. Compute txid & broadcast ───────────────────────────────────────────
+  const { hashTx } = require('./blockchain/block');
+  tx.txid = hashTx(tx);
+
+  console.log(`TxID: ${tx.txid}`);
+  console.log(`Inputs: ${selected.length}  Outputs: ${outputs.length}  Change: ${fmt(change)} AXN\n`);
+
+  const confirm = await ask('Broadcast transaction? (y/n): ');
+  if (confirm.toLowerCase() !== 'y') {
+    console.log('\n⚠️  Cancelled. Transaction not sent.\n');
+    process.exit(0);
+  }
+
+  try {
+    const res = await fetch(`${RPC}/tx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tx }),
+    });
+    const data: any = await res.json();
+    if (res.ok && data.txid) {
+      console.log(`\n✅ Transaction broadcast!`);
+      console.log(`   TxID: ${data.txid}`);
+      console.log(`   It will confirm in the next mined block.\n`);
+    } else {
+      console.log(`\n❌ Broadcast failed: ${data.error ?? JSON.stringify(data)}\n`);
+      process.exit(1);
+    }
+  } catch (e: any) {
+    console.log(`\n❌ Broadcast error: ${e.message}\n`);
+    process.exit(1);
+  }
+}
+
+const RPC_PORT_DEFAULT = 8332;
+
 async function cmdHelp() {
   banner();
   console.log('  Commands:');
   console.log('  ─────────────────────────────────────────────────────────');
-  console.log('  axon new                    Generate new BIP39 wallet');
-  console.log('  axon restore                Restore from 24-word mnemonic');
-  console.log('  axon address                Show your wallet address');
-  console.log('  axon balance [address]      Show AXN balance');
-  console.log('  axon mine [n]               Mine n blocks (default: 1)');
-  console.log('  axon mine [n] --address X   Mine to specific address');
-  console.log('  axon info                   Protocol info + issuance schedule');
-  console.log('  axon setup-inference        Check/setup real TinyLlama inference');
-  console.log('  axon test                   Run full test suite');
-  console.log('  axon help                   Show this help\n');
+  console.log('  axon new                        Generate new BIP39 wallet');
+  console.log('  axon restore                    Restore from 24-word mnemonic');
+  console.log('  axon address                    Show your wallet address');
+  console.log('  axon balance [address]          Show AXN balance');
+  console.log('  axon send <address> <amount>    Send AXN to an address');
+  console.log('  axon send <addr> <amt> --fee X  Send with custom fee (default 0.0001)');
+  console.log('  axon mine [n]                   Mine n blocks (default: 1)');
+  console.log('  axon mine [n] --address X       Mine to specific address');
+  console.log('  axon info                       Protocol info + issuance schedule');
+  console.log('  axon setup-inference            Check/setup real TinyLlama inference');
+  console.log('  axon test                       Run full test suite');
+  console.log('  axon help                       Show this help\n');
   console.log('  Security:');
   console.log('  ─────────────────────────────────────────────────────────');
   console.log('  ✅ Real secp256k1 ECDSA signatures');
@@ -401,6 +567,17 @@ async function main() {
       const addrIdx = args.indexOf('--address');
       const addr    = addrIdx !== -1 ? args[addrIdx + 1] : undefined;
       return cmdMine(n, addr);
+    }
+    case 'send': {
+      const toAddr  = args[1];
+      const amount  = args[2];
+      if (!toAddr || !amount) {
+        console.log('\nUsage: axon send <address> <amount> [--fee <axn>]\n');
+        process.exit(1);
+      }
+      const feeIdx = args.indexOf('--fee');
+      const fee    = feeIdx !== -1 ? args[feeIdx + 1] : undefined;
+      return cmdSend(toAddr, amount, fee);
     }
     case 'setup-inference': return cmdSetupInference();
     case 'test': {

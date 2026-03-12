@@ -108,25 +108,97 @@ class PeerConnection {
     return `${addr}:${port}`;
   }
 
+  get remoteIP(): string { return this.socket.remoteAddress || '?'; }
+
   destroy() { this.socket.destroy(); }
 }
 
 // ─── P2P SERVER ──────────────────────────────────────────────────────────────
 
+const BAN_THRESHOLD  = 10;    // strikes before ban
+const BAN_DURATION   = 3600;  // seconds (1 hour)
+const MAX_MSG_RATE   = 60;    // max messages per minute per peer
+
+interface BanEntry { until: number; reason: string; }
+
 export class P2PServer {
-  private server:   net.Server;
-  private peers:    Map<string, PeerConnection> = new Map();
-  private chain:    Blockchain;
-  private port:     number;
-  private seedPeers: string[];
-  private seenBlocks = new Set<string>(); // dedup broadcasts
-  private seenTxs    = new Set<string>();
+  private server:     net.Server;
+  private peers:      Map<string, PeerConnection> = new Map();
+  private chain:      Blockchain;
+  private port:       number;
+  private seedPeers:  string[];
+  private seenBlocks  = new Set<string>();
+  private seenTxs     = new Set<string>();
+  // Per-IP strike tracking and ban list
+  private strikes:    Map<string, number> = new Map();
+  private banned:     Map<string, BanEntry> = new Map();
+  // Per-peer message rate tracking
+  private msgCount:   Map<string, number> = new Map();
+  private msgWindow:  Map<string, number> = new Map();
 
   constructor(chain: Blockchain, port: number, seedPeers: string[] = []) {
     this.chain     = chain;
     this.port      = port;
     this.seedPeers = seedPeers;
     this.server    = net.createServer(socket => this.onIncoming(socket));
+  }
+
+  // ── Ban / strike helpers ─────────────────────────────────────────────────
+
+  private getIP(peer: PeerConnection): string {
+    return peer.remoteIP || '?';
+  }
+
+  private isBanned(ip: string): boolean {
+    const entry = this.banned.get(ip);
+    if (!entry) return false;
+    if (Date.now() / 1000 > entry.until) {
+      this.banned.delete(ip);
+      return false;
+    }
+    return true;
+  }
+
+  private strike(peer: PeerConnection, reason: string) {
+    const ip = this.getIP(peer);
+    const count = (this.strikes.get(ip) ?? 0) + 1;
+    this.strikes.set(ip, count);
+    console.warn(`[P2P] ⚠️  Strike ${count}/${BAN_THRESHOLD} for ${ip}: ${reason}`);
+    if (count >= BAN_THRESHOLD) {
+      this.ban(peer, reason);
+    }
+  }
+
+  private ban(peer: PeerConnection, reason: string) {
+    const ip    = this.getIP(peer);
+    const until = Math.floor(Date.now() / 1000) + BAN_DURATION;
+    this.banned.set(ip, { until, reason });
+    this.strikes.delete(ip);
+    console.warn(`[P2P] 🚫 Banned ${ip} for ${BAN_DURATION}s: ${reason}`);
+    peer.destroy();
+    // Remove from active peers
+    for (const [id, p] of this.peers) {
+      if (p === peer) { this.peers.delete(id); break; }
+    }
+  }
+
+  private checkMsgRate(peer: PeerConnection): boolean {
+    const ip  = this.getIP(peer);
+    const now = Math.floor(Date.now() / 1000);
+    const windowStart = this.msgWindow.get(ip) ?? now;
+    if (now - windowStart > 60) {
+      // Reset window
+      this.msgWindow.set(ip, now);
+      this.msgCount.set(ip, 1);
+      return true;
+    }
+    const count = (this.msgCount.get(ip) ?? 0) + 1;
+    this.msgCount.set(ip, count);
+    if (count > MAX_MSG_RATE) {
+      this.strike(peer, `message rate exceeded: ${count}/min`);
+      return false;
+    }
+    return true;
   }
 
   async start() {
@@ -178,6 +250,12 @@ export class P2PServer {
   // ── Incoming connection ───────────────────────────────────────────────────
 
   private onIncoming(socket: net.Socket) {
+    const ip = socket.remoteAddress || '?';
+    if (this.isBanned(ip)) {
+      console.warn(`[P2P] Rejected connection from banned IP: ${ip}`);
+      socket.destroy();
+      return;
+    }
     const peer = new PeerConnection(socket, this.handleMsg.bind(this), this.onPeerClose.bind(this));
     const id   = `${socket.remoteAddress}:${socket.remotePort}`;
     this.peers.set(id, peer);
@@ -212,6 +290,8 @@ export class P2PServer {
   // ── Message handling ──────────────────────────────────────────────────────
 
   private async handleMsg(peer: PeerConnection, msg: P2PMessage) {
+    // Rate limiting — too many messages per minute → strike
+    if (!this.checkMsgRate(peer)) return;
     try {
       await this._handleMsg(peer, msg);
     } catch(e: any) {
@@ -268,6 +348,7 @@ export class P2PServer {
             accepted++;
           } else {
             console.log(`[P2P] Block h=${block.height} rejected: ${result.error}`);
+            this.strike(peer, `invalid block: ${result.error}`);
             break; // stop at first failure
           }
         }
@@ -289,7 +370,6 @@ export class P2PServer {
         const result = this.chain.addBlock(block);
         if (result.success) {
           console.log(`[P2P] Accepted block ${block.height} from ${peer.address}`);
-          // Relay to other peers
           this.broadcast('NEWBLOCK', { block }, peer);
         }
         break;
@@ -332,6 +412,17 @@ export class P2PServer {
   }
 
   // ── Broadcast helpers ─────────────────────────────────────────────────────
+
+  getBanList(): Array<{ ip: string; until: number; reason: string; remainingSec: number }> {
+    const now = Math.floor(Date.now() / 1000);
+    const list = [];
+    for (const [ip, entry] of this.banned) {
+      if (entry.until > now) {
+        list.push({ ip, until: entry.until, reason: entry.reason, remainingSec: entry.until - now });
+      }
+    }
+    return list;
+  }
 
   broadcastBlock(block: Block) {
     if (block.hash) this.seenBlocks.add(block.hash);

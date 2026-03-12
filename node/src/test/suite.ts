@@ -275,9 +275,10 @@ async function testBlockValidation() {
   // ── Signature enforcement tests ──────────────────────────────────────────
 
   await test('Block with valid signed tx is accepted', async () => {
-    // Mine block 1 to give miner a UTXO to spend
-    const b1 = await mineBlock(chain, miner.address, [], false);
-    chain.addBlock(b1.block);
+    // Use skipMaturity=true so we can spend coinbase immediately in tests
+    const sigChain = new Blockchain(true, false, undefined, true);
+    const b1 = await mineBlock(sigChain, miner.address, [], false);
+    sigChain.addBlock(b1.block);
     const coinbaseTx = b1.block.transactions[0];
     const coinbaseTxid = coinbaseTx.txid!;
 
@@ -308,9 +309,38 @@ async function testBlockValidation() {
     spendTx.inputs[0].scriptSig = buildScriptSig(sigHex, miner.publicKeyHex);
 
     // Mine block 2 containing the spend
-    const b2 = await mineBlock(chain, miner.address, [spendTx], false);
-    const added = chain.addBlock(b2.block);
+    const b2 = await mineBlock(sigChain, miner.address, [spendTx], false);
+    const added = sigChain.addBlock(b2.block);
     assert(added.success, `Valid signed tx rejected: ${added.error}`);
+  });
+
+  await test('Spending immature coinbase is rejected', async () => {
+    const freshChain = new Blockchain(true);
+    const miner2 = keypairFromSeed('maturity-test-miner');
+
+    // Mine block 1 — gives miner a coinbase UTXO at height 1
+    const b1 = await mineBlock(freshChain, miner2.address, [], false);
+    freshChain.addBlock(b1.block);
+    const coinbaseTx   = b1.block.transactions[0];
+    const coinbaseTxid = coinbaseTx.txid!;
+    const utxoValue    = coinbaseTx.outputs[0].value;
+
+    // Try to spend the coinbase immediately (age = 1, needs 100)
+    const receiver = keypairFromSeed('maturity-receiver');
+    const spendTx = {
+      version: 1,
+      inputs: [{ prevTxid: coinbaseTxid, prevIndex: 0, scriptSig: '', sequence: 0xffffffff }],
+      outputs: [{ value: utxoValue - 1000n, scriptPubKey: addressToScript(receiver.address) }],
+      locktime: 0,
+    };
+    const scriptPubKey = addressToScript(miner2.address);
+    const sigHash = txSigHash(spendTx, 0, scriptPubKey);
+    spendTx.inputs[0].scriptSig = buildScriptSig(signTx(sigHash, miner2.privateKeyHex), miner2.publicKeyHex);
+
+    const b2 = await mineBlock(freshChain, miner2.address, [spendTx], false);
+    const added = freshChain.addBlock(b2.block);
+    assert(!added.success, 'Immature coinbase spend should be rejected');
+    assert(added.error?.includes('immature') ?? false, `Expected maturity error, got: ${added.error}`);
   });
 
   await test('Block with invalid signature is rejected', async () => {
@@ -318,8 +348,8 @@ async function testBlockValidation() {
     const wrongKey   = keypairFromSeed('attacker-key');
     const victimKey  = keypairFromSeed('test-miner-suite');
 
-    // Mine a block to get a UTXO
-    const freshChain = new Blockchain(true);
+    // Use skipMaturity so the coinbase is spendable immediately
+    const freshChain = new Blockchain(true, false, undefined, true);
     const b1 = await mineBlock(freshChain, victimKey.address, [], false);
     freshChain.addBlock(b1.block);
     const coinbaseTx   = b1.block.transactions[0];

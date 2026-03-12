@@ -224,6 +224,11 @@ async function main() {
     res.json(p2p.getPeers());
   });
 
+  // GET /peers/banned
+  app.get('/peers/banned', (req, res) => {
+    res.json({ banned: p2p.getBanList() });
+  });
+
   // POST /tx — broadcast a transaction
   app.post('/tx', txLimiter, (req, res) => {
     const tx: Transaction = req.body;

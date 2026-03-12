@@ -6,9 +6,11 @@
 import { Block, BlockchainState, UTXO } from './types';
 import { hashBlock, validateBlock, getBlockReward, computeMerkleRoot } from './block';
 import {
-  GENESIS_TIMESTAMP, INITIAL_POW_TARGET, INITIAL_POAW_TARGET,
+  GENESIS_TIMESTAMP, GENESIS_HASH, GENESIS_MESSAGE,
+  INITIAL_POW_TARGET, INITIAL_POAW_TARGET,
   TESTNET_POW_TARGET, TESTNET_POAW_TARGET,
   TARGET_BLOCK_TIME, DIFFICULTY_ADJUSTMENT_INTERVAL, HALVING_INTERVAL,
+  CANONICAL_MODEL, CHECKPOINTS,
 } from './constants';
 import { adjustTarget } from './crypto';
 import { ChainStore }    from './store';
@@ -22,14 +24,16 @@ export class Blockchain {
   private utxos:       Map<string, UTXO>   = new Map();
   private state!:      BlockchainState;
 
-  private testnet:    boolean;
-  private store:      ChainStore | null = null;
-  private persisted:  boolean;
-  private initPromise: Promise<void>;
+  private testnet:           boolean;
+  private store:             ChainStore | null = null;
+  private persisted:         boolean;
+  private skipMaturity:      boolean;
+  private initPromise:       Promise<void>;
 
-  constructor(testnet = true, persist = false, chainDir?: string) {
-    this.testnet   = testnet;
-    this.persisted = persist;
+  constructor(testnet = true, persist = false, chainDir?: string, skipMaturity = false) {
+    this.testnet      = testnet;
+    this.persisted    = persist;
+    this.skipMaturity = skipMaturity;
     if (persist) {
       this.store = new ChainStore(chainDir);
     }
@@ -66,32 +70,72 @@ export class Blockchain {
   }
 
   private initGenesis() {
+    const { hashTx, computeMerkleRoot } = require('./block');
+
+    // Genesis coinbase — embeds the canonical model hash and genesis message
+    // scriptSig: height(4) + model_sha256(32) + message_utf8
+    const heightBytes = Buffer.alloc(4);
+    heightBytes.writeUInt32LE(0, 0);
+    const modelHashBytes = Buffer.from(CANONICAL_MODEL.sha256, 'hex');
+    const messageBytes   = Buffer.from(GENESIS_MESSAGE, 'utf8');
+    const scriptSig = Buffer.concat([heightBytes, modelHashBytes, messageBytes]).toString('hex');
+
+    const genesisCoinbase: any = {
+      version: 1,
+      inputs: [{
+        prevTxid:  '00'.repeat(32),
+        prevIndex: 0xffffffff,
+        scriptSig,
+        sequence:  0xffffffff,
+      }],
+      outputs: [{
+        value:        0n,          // no reward on genesis block
+        scriptPubKey: '76a914' + '00'.repeat(20) + '88ac',
+      }],
+      locktime: 0,
+    };
+    genesisCoinbase.txid = hashTx(genesisCoinbase);
+
+    const merkleRoot = computeMerkleRoot([genesisCoinbase]);
+
     const genesis: Block = {
       header: {
         version:       1,
         prevHash:      '0'.repeat(64),
-        merkleRoot:    '0'.repeat(64),
+        merkleRoot,
         timestamp:     GENESIS_TIMESTAMP,
         powBits:       0x1d00ffff,
         powNonce:      0,
         poawBits:      0x1d00ffff,
         poawNonce:     0,
         minerAddress:  '0'.repeat(40),
-        inferenceHash: '0'.repeat(64),
+        inferenceHash: CANONICAL_MODEL.sha256,  // pin model in genesis header
       },
-      transactions: [],
+      transactions: [genesisCoinbase as any],
       height: 0,
     };
-    const genesisHash = '0'.repeat(63) + '1';
+
+    // Compute the real genesis hash from the header
+    const { hashBlock } = require('./block');
+    const genesisHash = hashBlock(genesis.header);
     genesis.hash = genesisHash;
+
+    // Verify it matches our hardcoded expected hash (catches any accidental changes)
+    if (genesisHash !== GENESIS_HASH) {
+      throw new Error(
+        `Genesis hash mismatch!\n` +
+        `  Computed: ${genesisHash}\n` +
+        `  Expected: ${GENESIS_HASH}\n` +
+        `  Update GENESIS_HASH in constants.ts if this is intentional.`
+      );
+    }
 
     this.blocks.set(genesisHash, genesis);
     this.heightIndex.set(0, genesisHash);
     this.state.bestBlockHash = genesisHash;
 
     if (!this.persisted) {
-      console.log(`[AXON] Genesis block: ${genesisHash}`);
-      console.log(`[AXON] Message: "Mine with intelligence, not just electricity. 2026-03-12"`);
+      console.log(`[AXON] Genesis: ${genesisHash.substring(0, 24)}...`);
     }
   }
 
@@ -141,13 +185,25 @@ export class Blockchain {
       this.state.powTarget, this.state.poawTarget,
       (txid, index) => {
         const utxo = this.utxos.get(`${txid}:${index}`);
-        return utxo ? { value: utxo.value, scriptPubKey: utxo.scriptPubKey } : null;
+        if (!utxo) return null;
+        // skipMaturity: treat all UTXOs as non-coinbase (test-only flag)
+        const effectiveCoinbase = this.skipMaturity ? false : utxo.coinbase;
+        return { value: utxo.value, scriptPubKey: utxo.scriptPubKey, coinbase: effectiveCoinbase, blockHeight: utxo.blockHeight };
       }
     );
 
     if (!result.valid) return { success: false, error: result.error };
 
-    const blockHash  = hashBlock(block.header);
+    const blockHash = hashBlock(block.header);
+
+    // Checkpoint enforcement — block hash must match if height is checkpointed
+    const checkpoint = CHECKPOINTS.find(([h]) => h === height);
+    if (checkpoint) {
+      const [, expectedHash] = checkpoint;
+      if (blockHash !== expectedHash) {
+        return { success: false, error: `Checkpoint failure at height ${height}: expected ${expectedHash.substring(0, 16)}..., got ${blockHash.substring(0, 16)}...` };
+      }
+    }
     block.hash   = blockHash;
     block.height = height;
 
