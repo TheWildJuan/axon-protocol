@@ -1,19 +1,19 @@
 #!/usr/bin/env ts-node
 /**
  * AXON Protocol — Wallet & Mining CLI
- * Usage: npx ts-node src/cli.ts <command> [options]
+ * Real BIP39 mnemonics, secp256k1 keys, HD derivation (m/44'/7777'/0'/0/0)
  */
 
 import * as readline from 'readline';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
-import { keypairFromSeed, formatAXN } from './wallet/wallet';
+import { generateWallet, keypairFromMnemonic, validateMnemonic, formatAXN } from './wallet/wallet';
 import { Blockchain } from './blockchain/chain';
 import { mineBlock } from './mining/miner';
 import { getBlockReward } from './blockchain/block';
 
 const WALLET_FILE = path.join(process.env.HOME || '.', '.axon', 'wallet.json');
+const CHAIN_DIR   = path.join(process.env.HOME || '.', '.axon', 'chain');
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -22,14 +22,25 @@ function ensureDir(p: string) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-function loadWallet(): { address: string; seed: string } | null {
+interface WalletFile {
+  address:  string;
+  mnemonic: string;
+  path:     string;
+}
+
+function loadWallet(): WalletFile | null {
   if (!fs.existsSync(WALLET_FILE)) return null;
   return JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
 }
 
-function saveWallet(address: string, seed: string) {
+function saveWallet(address: string, mnemonic: string) {
   ensureDir(WALLET_FILE);
-  fs.writeFileSync(WALLET_FILE, JSON.stringify({ address, seed }, null, 2), { mode: 0o600 });
+  const data: WalletFile = {
+    address,
+    mnemonic,
+    path: `m/44'/7777'/0'/0/0`,
+  };
+  fs.writeFileSync(WALLET_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
 function banner() {
@@ -40,9 +51,22 @@ function banner() {
   console.log('╚═══════════════════════════════════════╝\n');
 }
 
-function ask(prompt: string): Promise<string> {
+function ask(prompt: string, hidden = false): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => rl.question(prompt, ans => { rl.close(); resolve(ans.trim()); }));
+  if (hidden) (rl as any).stdoutMuted = true;
+  return new Promise(resolve => {
+    rl.question(prompt, ans => { rl.close(); resolve(ans.trim()); });
+  });
+}
+
+function printWords(mnemonic: string) {
+  const words = mnemonic.split(' ');
+  console.log('\n  Your 24-word recovery phrase:\n');
+  for (let i = 0; i < words.length; i += 6) {
+    const row = words.slice(i, i + 6)
+      .map((w, j) => `${String(i + j + 1).padStart(2)}. ${w.padEnd(12)}`).join('  ');
+    console.log('  ' + row);
+  }
 }
 
 // ─── COMMANDS ─────────────────────────────────────────────────────────────────
@@ -51,55 +75,65 @@ async function cmdNew() {
   banner();
   console.log('Generating new AXON wallet...\n');
 
-  // Generate random seed
-  const seed = crypto.randomBytes(32).toString('hex');
-  const kp   = keypairFromSeed(seed);
+  const { mnemonic, keypair } = generateWallet(256); // 24 words
 
-  console.log('┌─ NEW WALLET ────────────────────────────────────────────┐');
-  console.log(`│  Address:  ${kp.address}`);
-  console.log(`│  Seed:     ${seed}`);
+  printWords(mnemonic);
+
+  console.log('\n┌─────────────────────────────────────────────────────────┐');
+  console.log(`│  Address:  ${keypair.address}`);
+  console.log(`│  PubKey:   ${keypair.publicKeyHex.substring(0, 32)}...`);
+  console.log(`│  Path:     m/44'/7777'/0'/0/0`);
   console.log('├─────────────────────────────────────────────────────────┤');
-  console.log('│  ⚠️  WRITE DOWN YOUR SEED. It cannot be recovered.       │');
-  console.log('│  Anyone with your seed can access your AXN.             │');
+  console.log('│  🔐 WRITE DOWN YOUR 24 WORDS. They cannot be recovered. │');
+  console.log('│  Anyone with your phrase can access your AXN.           │');
+  console.log('│  Never share them. Never store them online.             │');
   console.log('└─────────────────────────────────────────────────────────┘\n');
 
   const save = await ask('Save wallet to ~/.axon/wallet.json? (y/n): ');
   if (save.toLowerCase() === 'y') {
-    saveWallet(kp.address, seed);
-    console.log(`\n✅ Wallet saved to ${WALLET_FILE} (chmod 600)`);
+    saveWallet(keypair.address, mnemonic);
+    console.log(`\n✅ Wallet saved (chmod 600): ${WALLET_FILE}`);
+    console.log(`   Address: ${keypair.address}\n`);
+  } else {
+    console.log('\n⚠️  Wallet NOT saved. Write down your mnemonic before closing.\n');
   }
-
-  console.log('\nYour address:', kp.address);
 }
 
 async function cmdRestore() {
   banner();
-  const seed = await ask('Enter your seed phrase or hex seed: ');
-  const kp   = keypairFromSeed(seed);
-  console.log('\n✅ Wallet restored');
-  console.log(`   Address: ${kp.address}`);
+  console.log('Restore wallet from 12 or 24-word mnemonic.\n');
+  const mnemonic = await ask('Enter mnemonic phrase: ');
 
-  const save = await ask('Save to ~/.axon/wallet.json? (y/n): ');
+  if (!validateMnemonic(mnemonic)) {
+    console.log('\n❌ Invalid mnemonic. Check your words and try again.\n');
+    process.exit(1);
+  }
+
+  const keypair = keypairFromMnemonic(mnemonic);
+  console.log('\n✅ Wallet verified');
+  console.log(`   Address: ${keypair.address}`);
+  console.log(`   Path:    m/44'/7777'/0'/0/0`);
+
+  const save = await ask('\nSave to ~/.axon/wallet.json? (y/n): ');
   if (save.toLowerCase() === 'y') {
-    saveWallet(kp.address, seed);
-    console.log(`✅ Saved to ${WALLET_FILE}`);
+    saveWallet(keypair.address, mnemonic);
+    console.log(`✅ Saved: ${WALLET_FILE}\n`);
   }
 }
 
 async function cmdAddress() {
   const wallet = loadWallet();
   if (!wallet) {
-    console.log('❌ No wallet found. Run: axon new');
+    console.log('\n❌ No wallet found. Run: axon new\n');
     process.exit(1);
   }
-  console.log('\nYour AXON address:');
-  console.log(`  ${wallet.address}\n`);
+  console.log(`\nYour AXON address:\n  ${wallet.address}\n`);
+  console.log(`Derivation path: ${wallet.path}\n`);
 }
 
 async function cmdMine(blocks: number, address?: string) {
   banner();
 
-  // Resolve miner address
   let minerAddress = address;
   if (!minerAddress) {
     const wallet = loadWallet();
@@ -110,16 +144,16 @@ async function cmdMine(blocks: number, address?: string) {
     minerAddress = wallet.address;
   }
 
-  console.log(`Mining ${blocks} block(s) to: ${minerAddress}`);
-  console.log('─'.repeat(60));
+  console.log(`Mining ${blocks} block(s) → ${minerAddress}`);
+  console.log('─'.repeat(66));
 
   const chain = new Blockchain(true);
   let totalEarned = 0n;
 
   for (let i = 0; i < blocks; i++) {
-    const height  = chain.getHeight() + 1;
-    const reward  = getBlockReward(height);
-    process.stdout.write(`Block ${height}: mining... `);
+    const height = chain.getHeight() + 1;
+    const reward = getBlockReward(height);
+    process.stdout.write(`  Block ${String(height).padStart(4)}: mining... `);
 
     const start  = Date.now();
     const result = await mineBlock(chain, minerAddress, [], false);
@@ -128,22 +162,38 @@ async function cmdMine(blocks: number, address?: string) {
 
     if (added.success) {
       totalEarned += reward;
-      console.log(`✅ ${formatAXN(reward)} earned | ${ms}ms | hash: ${result.block.hash?.substring(0,20)}...`);
+      console.log(`✅ ${formatAXN(reward)}  ${ms}ms  ${result.block.hash?.substring(0, 16)}...`);
     } else {
-      console.log(`❌ rejected: ${added.error}`);
+      console.log(`❌ ${added.error}`);
     }
   }
 
-  console.log('─'.repeat(60));
-  console.log(`\nTotal earned:  ${formatAXN(totalEarned)}`);
-  console.log(`Chain height:  ${chain.getHeight()}`);
-
-  // Show balance from UTXO set
   const bal = chain.getBalance(minerAddress);
-  console.log(`Address:       ${minerAddress}`);
-  console.log(`Balance:       ${formatAXN(bal.confirmed)}  (${bal.utxos.length} UTXOs)`);
-  console.log('\n⚠️  Note: This is a local testnet. AXN mined here has no real value yet.');
-  console.log('    Real network mining requires P2P (coming in v0.2)\n');
+
+  console.log('─'.repeat(66));
+  console.log(`\n  Address:       ${minerAddress}`);
+  console.log(`  Blocks mined:  ${blocks}`);
+  console.log(`  Total earned:  ${formatAXN(totalEarned)}`);
+  console.log(`  Balance:       ${formatAXN(bal.confirmed)}  (${bal.utxos.length} UTXOs)`);
+  console.log(`  Chain height:  ${chain.getHeight()}`);
+  console.log('\n  ⚠️  Local testnet — balance resets each session until LevelDB persistence is added.');
+  console.log('  ⚠️  Real network mining requires P2P (v0.2)\n');
+}
+
+async function cmdBalance(address?: string) {
+  banner();
+  const addr = address || loadWallet()?.address;
+  if (!addr) {
+    console.log('❌ No wallet. Run: axon new  or pass an address.\n');
+    process.exit(1);
+  }
+  // Local chain — balance only meaningful in same session as mining
+  const chain   = new Blockchain(true);
+  const balance = chain.getBalance(addr);
+  console.log(`  Address: ${addr}`);
+  console.log(`  Balance: ${formatAXN(balance.confirmed)}  (${balance.utxos.length} UTXOs)`);
+  console.log('\n  ℹ️  Balance reflects local in-memory chain only.');
+  console.log('  ℹ️  Mine blocks in same session to see non-zero balance.\n');
 }
 
 async function cmdInfo() {
@@ -151,100 +201,52 @@ async function cmdInfo() {
   const chain    = new Blockchain(true);
   const schedule = chain.getIssuanceSchedule();
 
-  console.log('Protocol Parameters:');
+  console.log('  Protocol Parameters:');
+  console.log('  ─────────────────────────────────────────────');
   console.log('  Max supply:      21,000,000 AXN');
   console.log('  Initial reward:  50 AXN/block');
-  console.log('  Halving:         every 210,000 blocks');
-  console.log('  Block time:      ~10 minutes (target)');
+  console.log('  Halving:         every 210,000 blocks (~4 years)');
+  console.log('  Block time:      ~10 minutes');
   console.log('  Consensus:       SHA-256d PoW + PoAW (AI inference)');
   console.log('  AI model:        TinyLlama-1.1B-Q4_K_M (pinned)');
+  console.log('  Wallet:          BIP39/BIP32, path m/44\'/7777\'/0\'/0/0');
+  console.log('  Signing:         secp256k1 ECDSA (real)');
   console.log('  No premine:      ✅');
   console.log('  No admin keys:   ✅');
-
-  console.log('\nIssuance Schedule (first 10 eras):');
-  console.log('  Era | Reward       | Blocks      | Era Supply');
-  console.log('  ' + '─'.repeat(52));
+  console.log('\n  Issuance Schedule:');
+  console.log('  ─────────────────────────────────────────────────────────────');
+  console.log('  Era  | Reward/block      | Start block | Era Supply');
+  console.log('  ─────────────────────────────────────────────────────────────');
   schedule.slice(0, 10).forEach(e => {
     console.log(
-      `  ${String(e.era).padStart(3)} | ` +
+      `  ${String(e.era).padStart(3)}  | ` +
       `${String(e.reward).padStart(18)} | ` +
       `${String(e.startBlock).padStart(11)} | ` +
       `${e.eraSupply}`
     );
   });
-  console.log('\n  ... approaches 21,000,000 AXN asymptotically\n');
-}
-
-async function cmdBalance(address?: string) {
-  banner();
-
-  let targetAddress = address;
-  if (!targetAddress) {
-    const wallet = loadWallet();
-    if (!wallet) {
-      console.log('❌ No wallet found. Run: axon new  (or pass an address)');
-      process.exit(1);
-    }
-    targetAddress = wallet.address;
-  }
-
-  // Mine some demo blocks so we have a funded chain to query
-  // In production this would query a synced node via RPC
-  console.log(`Querying balance for: ${targetAddress}`);
-  console.log('─'.repeat(60));
-
-  const chain   = new Blockchain(true);
-  const balance = chain.getBalance(targetAddress);
-
-  if (balance.utxos.length === 0) {
-    console.log('\n  Balance: 0.00000000 AXN');
-    console.log('\n  ℹ️  No UTXOs found for this address on local chain.');
-    console.log('     Mine some blocks first: axon mine 5\n');
-    return;
-  }
-
-  console.log(`\n  Balance:  ${formatAXN(balance.confirmed)}`);
-  console.log(`  UTXOs:    ${balance.utxos.length}`);
-  console.log('\n  UTXO breakdown:');
-  console.log('  ' + '─'.repeat(56));
-  for (const utxo of balance.utxos) {
-    const type = utxo.coinbase ? 'coinbase' : 'transfer';
-    console.log(`  ${formatAXN(utxo.value).padEnd(24)} block ${utxo.blockHeight}  [${type}]`);
-  }
-  console.log('  ' + '─'.repeat(56));
-  console.log(`  Total: ${formatAXN(balance.confirmed)}\n`);
-  console.log('  ⚠️  Local testnet only. Real balance requires synced node.\n');
-}
-
-async function cmdMineAndBalance(blocks: number, address?: string) {
-  // Combined: mine blocks then show balance
-  await cmdMine(blocks, address);
-
-  // Re-run mining on fresh chain to compute balance
-  const minerAddress = address || loadWallet()?.address;
-  if (!minerAddress) return;
-
-  const chain = new Blockchain(true);
-  for (let i = 0; i < blocks; i++) {
-    const result = await mineBlock(chain, minerAddress, [], false);
-    chain.addBlock(result.block);
-  }
-  const balance = chain.getBalance(minerAddress);
-  console.log(`Running balance: ${formatAXN(balance.confirmed)} (${balance.utxos.length} UTXOs)\n`);
+  console.log('  ... approaches 21,000,000 AXN asymptotically\n');
 }
 
 async function cmdHelp() {
   banner();
-  console.log('Commands:');
-  console.log('  axon new                    Generate new wallet');
-  console.log('  axon restore                Restore wallet from seed');
+  console.log('  Commands:');
+  console.log('  ─────────────────────────────────────────────────────────');
+  console.log('  axon new                    Generate new BIP39 wallet');
+  console.log('  axon restore                Restore from 24-word mnemonic');
   console.log('  axon address                Show your wallet address');
-  console.log('  axon balance [address]      Show AXN balance for address');
+  console.log('  axon balance [address]      Show AXN balance');
   console.log('  axon mine [n]               Mine n blocks (default: 1)');
   console.log('  axon mine [n] --address X   Mine to specific address');
   console.log('  axon info                   Protocol info + issuance schedule');
-  console.log('  axon test                   Run test suite');
+  console.log('  axon test                   Run full test suite');
   console.log('  axon help                   Show this help\n');
+  console.log('  Security:');
+  console.log('  ─────────────────────────────────────────────────────────');
+  console.log('  ✅ Real secp256k1 ECDSA signatures');
+  console.log('  ✅ BIP39 24-word mnemonic (256-bit entropy)');
+  console.log('  ✅ BIP32 HD derivation (m/44\'/7777\'/0\'/0/0)');
+  console.log('  ✅ Wallet file saved chmod 600\n');
 }
 
 // ─── DISPATCH ─────────────────────────────────────────────────────────────────
@@ -254,28 +256,25 @@ async function main() {
   const cmd  = args[0] || 'help';
 
   switch (cmd) {
-    case 'new':      return cmdNew();
-    case 'restore':  return cmdRestore();
-    case 'address':  return cmdAddress();
-    case 'info':     return cmdInfo();
-    case 'help':     return cmdHelp();
+    case 'new':     return cmdNew();
+    case 'restore': return cmdRestore();
+    case 'address': return cmdAddress();
+    case 'balance': return cmdBalance(args[1]);
+    case 'info':    return cmdInfo();
+    case 'help':    return cmdHelp();
     case 'mine': {
       const n       = parseInt(args[1]) || 1;
       const addrIdx = args.indexOf('--address');
       const addr    = addrIdx !== -1 ? args[addrIdx + 1] : undefined;
       return cmdMine(n, addr);
     }
-    case 'balance': {
-      const addr = args[1];
-      return cmdBalance(addr);
-    }
     case 'test': {
       const { execSync } = require('child_process');
-      execSync('npx ts-node src/test/suite.ts', { stdio: 'inherit' });
+      execSync('npx ts-node src/test/suite.ts', { stdio: 'inherit', cwd: __dirname + '/..' });
       return;
     }
     default:
-      console.log(`Unknown command: ${cmd}`);
+      console.log(`\nUnknown command: ${cmd}`);
       return cmdHelp();
   }
 }
