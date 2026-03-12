@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  axon-node:
+    build: ./node
+    container_name: axon-node
+    ports:
+      - "8332:8332"
+      - "8333:8333"
+    environment:
+      - MINER_SEED=your-secret-seed-here
+      - NETWORK=testnet
+    volumes:
+      - axon-data:/data
+    restart: unless-stopped
+
+volumes:
+  axon-data:
