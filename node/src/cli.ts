@@ -8,7 +8,7 @@ import * as readline from 'readline';
 import * as fs from 'fs';
 import * as path from 'path';
 import { generateWallet, keypairFromMnemonic, validateMnemonic, formatAXN } from './wallet/wallet';
-import { Blockchain } from './blockchain/chain';
+import { Blockchain, openChain } from './blockchain/chain';
 import { mineBlock } from './mining/miner';
 import { getBlockReward } from './blockchain/block';
 
@@ -147,7 +147,10 @@ async function cmdMine(blocks: number, address?: string) {
   console.log(`Mining ${blocks} block(s) → ${minerAddress}`);
   console.log('─'.repeat(66));
 
-  const chain = new Blockchain(true);
+  const chain = await openChain(true);
+  if (chain.getHeight() > 0) {
+    console.log(`  Resuming from block ${chain.getHeight()} (loaded from disk)`);
+  }
   let totalEarned = 0n;
 
   for (let i = 0; i < blocks; i++) {
@@ -157,7 +160,7 @@ async function cmdMine(blocks: number, address?: string) {
 
     const start  = Date.now();
     const result = await mineBlock(chain, minerAddress, [], false);
-    const added  = chain.addBlock(result.block);
+    const added  = await (chain as any).addBlockAsync(result.block);
     const ms     = Date.now() - start;
 
     if (added.success) {
@@ -176,7 +179,8 @@ async function cmdMine(blocks: number, address?: string) {
   console.log(`  Total earned:  ${formatAXN(totalEarned)}`);
   console.log(`  Balance:       ${formatAXN(bal.confirmed)}  (${bal.utxos.length} UTXOs)`);
   console.log(`  Chain height:  ${chain.getHeight()}`);
-  console.log('\n  ⚠️  Local testnet — balance resets each session until LevelDB persistence is added.');
+  await chain.close();
+  console.log('\n  ✅ Chain saved to disk (~/.axon/chain)');
   console.log('  ⚠️  Real network mining requires P2P (v0.2)\n');
 }
 
@@ -187,13 +191,12 @@ async function cmdBalance(address?: string) {
     console.log('❌ No wallet. Run: axon new  or pass an address.\n');
     process.exit(1);
   }
-  // Local chain — balance only meaningful in same session as mining
-  const chain   = new Blockchain(true);
+  const chain   = await openChain(true);
   const balance = chain.getBalance(addr);
+  await chain.close();
   console.log(`  Address: ${addr}`);
   console.log(`  Balance: ${formatAXN(balance.confirmed)}  (${balance.utxos.length} UTXOs)`);
-  console.log('\n  ℹ️  Balance reflects local in-memory chain only.');
-  console.log('  ℹ️  Mine blocks in same session to see non-zero balance.\n');
+  console.log(`  Chain:   height ${chain.getHeight()}\n`);
 }
 
 async function cmdInfo() {

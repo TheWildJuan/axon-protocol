@@ -1,3 +1,8 @@
+/**
+ * AXON Protocol — Blockchain
+ * Persistent (LevelDB) by default; in-memory for tests.
+ */
+
 import { Block, BlockchainState, UTXO } from './types';
 import { hashBlock, validateBlock, getBlockReward, computeMerkleRoot } from './block';
 import {
@@ -5,26 +10,56 @@ import {
   TESTNET_POW_TARGET, TESTNET_POAW_TARGET,
   TARGET_BLOCK_TIME, DIFFICULTY_ADJUSTMENT_INTERVAL, HALVING_INTERVAL,
 } from './constants';
-import { adjustTarget, bitsToTarget, targetToBits } from './crypto';
+import { adjustTarget } from './crypto';
+import { ChainStore }    from './store';
 
-// ─── IN-MEMORY BLOCKCHAIN ─────────────────────────────────────────────────────
-// Production: replace with LevelDB persistence
+// ─── BLOCKCHAIN ───────────────────────────────────────────────────────────────
 
 export class Blockchain {
-  private blocks: Map<string, Block> = new Map();
-  private heightIndex: Map<number, string> = new Map(); // height → hash
-  private utxos: Map<string, UTXO> = new Map();         // txid:index → UTXO
-  private state: BlockchainState;
-  private testnet: boolean;
+  // In-memory caches (always populated)
+  private blocks:      Map<string, Block>  = new Map();
+  private heightIndex: Map<number, string> = new Map();
+  private utxos:       Map<string, UTXO>   = new Map();
+  private state!:      BlockchainState;
 
-  constructor(testnet = true) {
-    this.testnet = testnet;
+  private testnet:    boolean;
+  private store:      ChainStore | null = null;
+  private persisted:  boolean;
+  private initPromise: Promise<void>;
+
+  constructor(testnet = true, persist = false) {
+    this.testnet   = testnet;
+    this.persisted = persist;
+    if (persist) {
+      this.store = new ChainStore();
+    }
+    this.initPromise = this.init();
+  }
+
+  // Wait for async init — call before first use when persist=true
+  async ready(): Promise<void> {
+    return this.initPromise;
+  }
+
+  private async init() {
+    if (this.store) {
+      await this.store.open();
+      const saved = await this.store.getState();
+      if (saved) {
+        this.state  = saved;
+        this.utxos  = await this.store.getAllUTXOs();
+        console.log(`[AXON] Loaded chain from disk: height ${this.state.height}, best: ${this.state.bestBlockHash.substring(0, 16)}...`);
+        console.log(`[AXON] Restored ${this.utxos.size} UTXOs from disk`);
+        return;
+      }
+    }
+    // Fresh chain
     this.state = {
       height:         0,
       bestBlockHash:  '0'.repeat(64),
       totalWork:      0n,
-      powTarget:      testnet ? TESTNET_POW_TARGET  : INITIAL_POW_TARGET,
-      poawTarget:     testnet ? TESTNET_POAW_TARGET : INITIAL_POAW_TARGET,
+      powTarget:      this.testnet ? TESTNET_POW_TARGET  : INITIAL_POW_TARGET,
+      poawTarget:     this.testnet ? TESTNET_POAW_TARGET : INITIAL_POAW_TARGET,
       lastAdjustTime: GENESIS_TIMESTAMP,
     };
     this.initGenesis();
@@ -47,23 +82,26 @@ export class Blockchain {
       transactions: [],
       height: 0,
     };
-
-    const genesisHash = '0'.repeat(63) + '1'; // symbolic
+    const genesisHash = '0'.repeat(63) + '1';
     genesis.hash = genesisHash;
 
     this.blocks.set(genesisHash, genesis);
     this.heightIndex.set(0, genesisHash);
     this.state.bestBlockHash = genesisHash;
 
-    console.log(`[AXON] Genesis block: ${genesisHash}`);
-    console.log(`[AXON] Message: "Mine with intelligence, not just electricity. 2026-03-12"`);
+    if (!this.persisted) {
+      console.log(`[AXON] Genesis block: ${genesisHash}`);
+      console.log(`[AXON] Message: "Mine with intelligence, not just electricity. 2026-03-12"`);
+    }
   }
 
-  getHeight(): number { return this.state.height; }
-  getBestHash(): string { return this.state.bestBlockHash; }
-  getState(): BlockchainState { return { ...this.state }; }
-  getPowTarget(): string { return this.state.powTarget; }
-  getPoawTarget(): string { return this.state.poawTarget; }
+  // ─── GETTERS ─────────────────────────────────────────────────────────────────
+
+  getHeight():    number           { return this.state.height; }
+  getBestHash():  string           { return this.state.bestBlockHash; }
+  getState():     BlockchainState  { return { ...this.state }; }
+  getPowTarget(): string           { return this.state.powTarget; }
+  getPoawTarget():string           { return this.state.poawTarget; }
 
   getBlock(hash: string): Block | undefined {
     return this.blocks.get(hash);
@@ -78,35 +116,31 @@ export class Blockchain {
     return this.utxos.get(`${txid}:${index}`);
   }
 
-  // Add a validated block to the chain
+  // ─── ADD BLOCK ───────────────────────────────────────────────────────────────
+
   addBlock(block: Block): { success: boolean; error?: string } {
-    const height = this.state.height + 1;
+    const height   = this.state.height + 1;
     const prevHash = this.state.bestBlockHash;
 
     const result = validateBlock(
-      block,
-      prevHash,
-      height,
-      this.state.powTarget,
-      this.state.poawTarget,
+      block, prevHash, height,
+      this.state.powTarget, this.state.poawTarget,
       (txid, index) => {
         const utxo = this.utxos.get(`${txid}:${index}`);
         return utxo ? utxo.value : null;
       }
     );
 
-    if (!result.valid) {
-      return { success: false, error: result.error };
-    }
+    if (!result.valid) return { success: false, error: result.error };
 
-    const blockHash = hashBlock(block.header);
+    const blockHash  = hashBlock(block.header);
     block.hash   = blockHash;
     block.height = height;
 
     // Update UTXO set
     this.applyBlock(block, height);
 
-    // Update chain state
+    // Update in-memory state
     this.blocks.set(blockHash, block);
     this.heightIndex.set(height, blockHash);
     this.state.height        = height;
@@ -120,18 +154,41 @@ export class Blockchain {
     return { success: true };
   }
 
+  async addBlockAsync(block: Block): Promise<{ success: boolean; error?: string }> {
+    const result = this.addBlock(block);
+    if (result.success && this.store) {
+      await this.persistBlock(block);
+    }
+    return result;
+  }
+
+  private async persistBlock(block: Block) {
+    if (!this.store) return;
+    await this.store.putBlock(block);
+    await this.store.putState(this.state);
+    // Persist UTXO changes (rebuild from in-memory map)
+    for (const tx of block.transactions) {
+      const isCoinbase = tx.inputs[0].prevIndex === 0xffffffff;
+      if (!isCoinbase) {
+        for (const inp of tx.inputs) {
+          await this.store.deleteUTXO(inp.prevTxid, inp.prevIndex);
+        }
+      }
+      for (let i = 0; i < tx.outputs.length; i++) {
+        const utxo = this.utxos.get(`${tx.txid}:${i}`);
+        if (utxo) await this.store.putUTXO(utxo);
+      }
+    }
+  }
+
   private applyBlock(block: Block, height: number) {
     for (const tx of block.transactions) {
       const isCoinbase = tx.inputs[0].prevIndex === 0xffffffff;
-
-      // Remove spent UTXOs
       if (!isCoinbase) {
         for (const inp of tx.inputs) {
           this.utxos.delete(`${inp.prevTxid}:${inp.prevIndex}`);
         }
       }
-
-      // Add new UTXOs
       const txid = tx.txid!;
       for (let i = 0; i < tx.outputs.length; i++) {
         this.utxos.set(`${txid}:${i}`, {
@@ -154,32 +211,31 @@ export class Blockchain {
     const actualTime   = endBlock.header.timestamp - startBlock.header.timestamp;
     const expectedTime = DIFFICULTY_ADJUSTMENT_INTERVAL * TARGET_BLOCK_TIME;
 
-    const newPowTarget  = adjustTarget(this.state.powTarget,  actualTime, expectedTime);
-    const newPoawTarget = adjustTarget(this.state.poawTarget, actualTime, expectedTime);
-
-    console.log(`[AXON] Difficulty adjustment at block ${height}`);
-    console.log(`  PoW:  ${this.state.powTarget.substring(0,16)}... → ${newPowTarget.substring(0,16)}...`);
-    console.log(`  PoAW: ${this.state.poawTarget.substring(0,16)}... → ${newPoawTarget.substring(0,16)}...`);
-
-    this.state.powTarget  = newPowTarget;
-    this.state.poawTarget = newPoawTarget;
+    this.state.powTarget  = adjustTarget(this.state.powTarget,  actualTime, expectedTime);
+    this.state.poawTarget = adjustTarget(this.state.poawTarget, actualTime, expectedTime);
     this.state.lastAdjustTime = endBlock.header.timestamp;
+
+    console.log(`[AXON] Difficulty adjusted at block ${height}`);
   }
+
+  // ─── BALANCE / UTXO QUERY ────────────────────────────────────────────────────
 
   getBalance(address: string): { confirmed: bigint; utxos: UTXO[] } {
     const { addressToScript } = require('./block');
     const targetScript = addressToScript(address);
     const matching: UTXO[] = [];
     for (const utxo of this.utxos.values()) {
-      if (utxo.scriptPubKey === targetScript) {
-        matching.push(utxo);
-      }
+      if (utxo.scriptPubKey === targetScript) matching.push(utxo);
     }
-    const total = matching.reduce((sum, u) => sum + u.value, 0n);
+    const total = matching.reduce((s, u) => s + u.value, 0n);
     return { confirmed: total, utxos: matching };
   }
 
-  getIssuanceSchedule(): Array<{ era: number; startBlock: number; endBlock: number; reward: string; eraSupply: string }> {
+  // ─── ISSUANCE SCHEDULE ───────────────────────────────────────────────────────
+
+  getIssuanceSchedule(): Array<{
+    era: number; startBlock: number; endBlock: number; reward: string; eraSupply: string;
+  }> {
     const schedule = [];
     for (let era = 0; era < 33; era++) {
       const reward = era < 64 ? (5_000_000_000n >> BigInt(era)) : 0n;
@@ -194,4 +250,16 @@ export class Blockchain {
     }
     return schedule;
   }
+
+  async close() {
+    if (this.store) await this.store.close();
+  }
+}
+
+// ─── FACTORY: open persistent chain ──────────────────────────────────────────
+
+export async function openChain(testnet = true): Promise<Blockchain> {
+  const chain = new Blockchain(testnet, true);
+  await chain.ready();
+  return chain;
 }
