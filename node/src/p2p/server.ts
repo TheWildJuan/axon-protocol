@@ -11,9 +11,11 @@
  */
 
 import * as net    from 'net';
+import * as dns    from 'dns/promises';
 import { Block, Transaction } from '../blockchain/types';
 import { Blockchain }         from '../blockchain/chain';
 import { hashBlock }          from '../blockchain/block';
+import { DNS_SEEDS, DEFAULT_PORT } from '../blockchain/constants';
 
 // BigInt-safe JSON helpers
 function bigintReplacer(_: string, v: unknown) {
@@ -136,14 +138,41 @@ export class P2PServer {
       this.server.on('error', rej);
     });
 
-    // Connect to seed peers
+    // Connect to manually configured peers
     for (const addr of this.seedPeers) {
       const [host, portStr] = addr.split(':');
-      this.connectTo(host, parseInt(portStr || '8333'));
+      this.connectTo(host, parseInt(portStr || String(DEFAULT_PORT)));
+    }
+
+    // Bootstrap from DNS seeds if no manual peers configured
+    if (this.seedPeers.length === 0) {
+      this.bootstrapFromDNS().catch(() => {});
     }
 
     // Periodic ping / peer maintenance
     setInterval(() => this.maintenance(), 30_000);
+  }
+
+  // ── DNS seed bootstrap ───────────────────────────────────────────────────
+
+  private async bootstrapFromDNS() {
+    console.log('[P2P] Bootstrapping from DNS seeds...');
+    let found = 0;
+    for (const seed of DNS_SEEDS) {
+      try {
+        const addrs = await dns.resolve4(seed);
+        for (const ip of addrs) {
+          console.log(`[P2P] DNS seed ${seed} → ${ip}:${DEFAULT_PORT}`);
+          this.connectTo(ip, DEFAULT_PORT);
+          found++;
+        }
+      } catch {
+        // DNS resolution failed for this seed — normal if seed isn't live yet
+      }
+    }
+    if (found === 0) {
+      console.log('[P2P] No DNS seeds reachable — starting as isolated node.');
+    }
   }
 
   // ── Incoming connection ───────────────────────────────────────────────────

@@ -31,3 +31,11 @@ export const TESTNET_POAW_TARGET = '0fffffffffffffffffffffffffffffffffffffffffff
 export const NETWORK_MAGIC = Buffer.from('AXON', 'ascii');
 export const DEFAULT_PORT = 8333;
 export const RPC_PORT = 8332;
+
+// DNS seed hostnames — these resolve to IPs of stable seed nodes.
+// Add your own public node here when launching mainnet.
+export const DNS_SEEDS: string[] = [
+  'seed1.axonprotocol.net',
+  'seed2.axonprotocol.net',
+  'seed3.axonprotocol.net',
+];
