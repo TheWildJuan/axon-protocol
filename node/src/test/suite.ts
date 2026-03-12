@@ -8,7 +8,8 @@ import { sha256d, blake3, meetsTarget, adjustTarget, merkleRoot } from '../block
 import { hashBlock, deriveChallenge, computePoawInput, getBlockReward, createCoinbase, hashTx, computeMerkleRoot, validateBlock } from '../blockchain/block';
 import { Blockchain } from '../blockchain/chain';
 import { mineBlock } from '../mining/miner';
-import { keypairFromSeed, formatAXN } from '../wallet/wallet';
+import { keypairFromSeed, formatAXN, signTx, buildScriptSig } from '../wallet/wallet';
+import { addressToScript, txSigHash } from '../blockchain/block';
 import { INITIAL_REWARD, HALVING_INTERVAL, COIN } from '../blockchain/constants';
 import { Block } from '../blockchain/types';
 
@@ -269,6 +270,87 @@ async function testBlockValidation() {
     const height = chain.getHeight();
     const block  = chain.getBlockAtHeight(height);
     assert(block !== undefined, 'Should find block at current height');
+  });
+
+  // ── Signature enforcement tests ──────────────────────────────────────────
+
+  await test('Block with valid signed tx is accepted', async () => {
+    // Mine block 1 to give miner a UTXO to spend
+    const b1 = await mineBlock(chain, miner.address, [], false);
+    chain.addBlock(b1.block);
+    const coinbaseTx = b1.block.transactions[0];
+    const coinbaseTxid = coinbaseTx.txid!;
+
+    // Wait for coinbase maturity is skipped in tests — build a spend tx anyway
+    const receiver = keypairFromSeed('receiver-sig-test');
+    const utxoValue = coinbaseTx.outputs[0].value;
+    const fee = 1000n;
+
+    const spendTx = {
+      version: 1,
+      inputs: [{
+        prevTxid:  coinbaseTxid,
+        prevIndex: 0,
+        scriptSig: '', // fill below
+        sequence:  0xffffffff,
+      }],
+      outputs: [{
+        value:        utxoValue - fee,
+        scriptPubKey: addressToScript(receiver.address),
+      }],
+      locktime: 0,
+    };
+
+    // Sign input 0
+    const scriptPubKey = addressToScript(miner.address);
+    const sigHash = txSigHash(spendTx, 0, scriptPubKey);
+    const sigHex  = signTx(sigHash, miner.privateKeyHex);
+    spendTx.inputs[0].scriptSig = buildScriptSig(sigHex, miner.publicKeyHex);
+
+    // Mine block 2 containing the spend
+    const b2 = await mineBlock(chain, miner.address, [spendTx], false);
+    const added = chain.addBlock(b2.block);
+    assert(added.success, `Valid signed tx rejected: ${added.error}`);
+  });
+
+  await test('Block with invalid signature is rejected', async () => {
+    // Attempt to spend a UTXO with a wrong key
+    const wrongKey   = keypairFromSeed('attacker-key');
+    const victimKey  = keypairFromSeed('test-miner-suite');
+
+    // Mine a block to get a UTXO
+    const freshChain = new Blockchain(true);
+    const b1 = await mineBlock(freshChain, victimKey.address, [], false);
+    freshChain.addBlock(b1.block);
+    const coinbaseTx   = b1.block.transactions[0];
+    const coinbaseTxid = coinbaseTx.txid!;
+    const utxoValue    = coinbaseTx.outputs[0].value;
+
+    const spendTx = {
+      version: 1,
+      inputs: [{
+        prevTxid:  coinbaseTxid,
+        prevIndex: 0,
+        scriptSig: '',
+        sequence:  0xffffffff,
+      }],
+      outputs: [{
+        value:        utxoValue - 1000n,
+        scriptPubKey: addressToScript(wrongKey.address),
+      }],
+      locktime: 0,
+    };
+
+    // Sign with WRONG key (attacker trying to steal)
+    const scriptPubKey = addressToScript(victimKey.address);
+    const sigHash = txSigHash(spendTx, 0, scriptPubKey);
+    const sigHex  = signTx(sigHash, wrongKey.privateKeyHex);  // wrong key!
+    spendTx.inputs[0].scriptSig = buildScriptSig(sigHex, wrongKey.publicKeyHex);
+
+    const b2 = await mineBlock(freshChain, victimKey.address, [spendTx], false);
+    const added = freshChain.addBlock(b2.block);
+    assert(!added.success, 'Block with invalid signature should be rejected');
+    assert(added.error?.includes('Invalid signature') ?? false, `Expected sig error, got: ${added.error}`);
   });
 
   await test('Issuance schedule has correct era count', () => {

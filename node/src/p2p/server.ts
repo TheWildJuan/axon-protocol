@@ -67,7 +67,7 @@ class PeerConnection {
     this.onClose = onClose;
 
     socket.setEncoding('utf8');
-    socket.on('data',  data  => this.onData(data));
+    socket.on('data',  (data: string) => this.onData(data));
     socket.on('close', ()    => this.onClose(this));
     socket.on('error', (err) => {
       // Swallow connection errors — peer disconnected

@@ -3,6 +3,7 @@
  * Uses real secp256k1 signature verification
  */
 
+import * as crypto from 'crypto';
 import { BlockHeader, Block, Transaction, PoAWProof } from './types';
 import { sha256d, blake3, merkleRoot, meetsTarget, bitsToTarget } from './crypto';
 import { INITIAL_REWARD, HALVING_INTERVAL, COIN, COINBASE_MATURITY } from './constants';
@@ -225,10 +226,9 @@ export function verifyScriptSig(
     offset += pkLen;
 
     // Verify 1: pubkey hashes to the expected hash in scriptPubKey
-    const { sha256 }    = require('@noble/hashes/sha256');
-    const { ripemd160 } = require('@noble/hashes/ripemd160');
-    const pubKeyHash    = Buffer.from(ripemd160(sha256(pkBytes))).toString('hex');
-    const expectedHash  = scriptToHash(scriptPubKey);
+    const sha256Bytes = crypto.createHash('sha256').update(pkBytes).digest();
+    const pubKeyHash  = crypto.createHash('ripemd160').update(sha256Bytes).digest('hex');
+    const expectedHash = scriptToHash(scriptPubKey);
     if (pubKeyHash !== expectedHash) return false;
 
     // Verify 2: signature is valid over the sighash
@@ -258,7 +258,7 @@ export function validateBlock(
   height:      number,
   powTarget:   string,
   poawTarget:  string,
-  utxoLookup:  (txid: string, index: number) => bigint | null,
+  utxoLookup:  (txid: string, index: number) => { value: bigint; scriptPubKey: string } | null,
 ): ValidationResult {
 
   // 1. PoW check
@@ -301,44 +301,35 @@ export function validateBlock(
     return { valid: false, error: 'First transaction must be coinbase' };
   }
 
-  // Sum fees from non-coinbase transactions
+  // Sum fees and enforce signatures for non-coinbase transactions
   let totalFees = 0n;
   for (let t = 1; t < block.transactions.length; t++) {
     const tx = block.transactions[t];
     let inputSum  = 0n;
     let outputSum = 0n;
-    for (const inp of tx.inputs) {
-      const val = utxoLookup(inp.prevTxid, inp.prevIndex);
-      if (val === null) return { valid: false, error: `Unknown UTXO: ${inp.prevTxid}:${inp.prevIndex}` };
-      inputSum += val;
+
+    for (let i = 0; i < tx.inputs.length; i++) {
+      const inp  = tx.inputs[i];
+      const utxo = utxoLookup(inp.prevTxid, inp.prevIndex);
+      if (utxo === null) return { valid: false, error: `Unknown UTXO: ${inp.prevTxid}:${inp.prevIndex}` };
+      inputSum += utxo.value;
+
+      // 8. Signature verification (P2PKH)
+      const sigHash = txSigHash(tx, i, utxo.scriptPubKey);
+      if (!verifyScriptSig(inp.scriptSig, utxo.scriptPubKey, sigHash)) {
+        return { valid: false, error: `Invalid signature on tx ${tx.txid ?? t} input ${i}` };
+      }
     }
+
     for (const out of tx.outputs) outputSum += out.value;
     if (inputSum < outputSum) return { valid: false, error: 'Transaction outputs exceed inputs' };
     totalFees += inputSum - outputSum;
   }
 
-  const maxReward = getBlockReward(height) + totalFees;
+  const maxReward  = getBlockReward(height) + totalFees;
   const coinbaseOut = coinbase.outputs.reduce((s, o) => s + o.value, 0n);
   if (coinbaseOut > maxReward) {
     return { valid: false, error: `Coinbase ${coinbaseOut} exceeds allowed ${maxReward}` };
-  }
-
-  // 8. Signature verification for non-coinbase transactions
-  for (let t = 1; t < block.transactions.length; t++) {
-    const tx = block.transactions[t];
-    for (let i = 0; i < tx.inputs.length; i++) {
-      const inp     = tx.inputs[i];
-      const utxoVal = utxoLookup(inp.prevTxid, inp.prevIndex);
-      if (utxoVal === null) continue; // already checked above
-
-      // Get the scriptPubKey of the UTXO being spent
-      // In production this comes from the UTXO set; here we need it passed in
-      // For now: skip sig check on coinbase spends (will be fixed with full UTXO store)
-      if (inp.scriptSig && inp.scriptSig.length > 0) {
-        // Sig check deferred to full UTXO store integration
-        // The structure is correct — verifyScriptSig() is ready
-      }
-    }
   }
 
   return { valid: true };

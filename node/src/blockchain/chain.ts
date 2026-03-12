@@ -141,7 +141,7 @@ export class Blockchain {
       this.state.powTarget, this.state.poawTarget,
       (txid, index) => {
         const utxo = this.utxos.get(`${txid}:${index}`);
-        return utxo ? utxo.value : null;
+        return utxo ? { value: utxo.value, scriptPubKey: utxo.scriptPubKey } : null;
       }
     );
 
