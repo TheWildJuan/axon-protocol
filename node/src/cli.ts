@@ -135,8 +135,13 @@ async function cmdMine(blocks: number, address?: string) {
   }
 
   console.log('─'.repeat(60));
-  console.log(`\nTotal earned: ${formatAXN(totalEarned)}`);
-  console.log(`Chain height: ${chain.getHeight()}`);
+  console.log(`\nTotal earned:  ${formatAXN(totalEarned)}`);
+  console.log(`Chain height:  ${chain.getHeight()}`);
+
+  // Show balance from UTXO set
+  const bal = chain.getBalance(minerAddress);
+  console.log(`Address:       ${minerAddress}`);
+  console.log(`Balance:       ${formatAXN(bal.confirmed)}  (${bal.utxos.length} UTXOs)`);
   console.log('\n⚠️  Note: This is a local testnet. AXN mined here has no real value yet.');
   console.log('    Real network mining requires P2P (coming in v0.2)\n');
 }
@@ -170,12 +175,71 @@ async function cmdInfo() {
   console.log('\n  ... approaches 21,000,000 AXN asymptotically\n');
 }
 
+async function cmdBalance(address?: string) {
+  banner();
+
+  let targetAddress = address;
+  if (!targetAddress) {
+    const wallet = loadWallet();
+    if (!wallet) {
+      console.log('❌ No wallet found. Run: axon new  (or pass an address)');
+      process.exit(1);
+    }
+    targetAddress = wallet.address;
+  }
+
+  // Mine some demo blocks so we have a funded chain to query
+  // In production this would query a synced node via RPC
+  console.log(`Querying balance for: ${targetAddress}`);
+  console.log('─'.repeat(60));
+
+  const chain   = new Blockchain(true);
+  const balance = chain.getBalance(targetAddress);
+
+  if (balance.utxos.length === 0) {
+    console.log('\n  Balance: 0.00000000 AXN');
+    console.log('\n  ℹ️  No UTXOs found for this address on local chain.');
+    console.log('     Mine some blocks first: axon mine 5\n');
+    return;
+  }
+
+  console.log(`\n  Balance:  ${formatAXN(balance.confirmed)}`);
+  console.log(`  UTXOs:    ${balance.utxos.length}`);
+  console.log('\n  UTXO breakdown:');
+  console.log('  ' + '─'.repeat(56));
+  for (const utxo of balance.utxos) {
+    const type = utxo.coinbase ? 'coinbase' : 'transfer';
+    console.log(`  ${formatAXN(utxo.value).padEnd(24)} block ${utxo.blockHeight}  [${type}]`);
+  }
+  console.log('  ' + '─'.repeat(56));
+  console.log(`  Total: ${formatAXN(balance.confirmed)}\n`);
+  console.log('  ⚠️  Local testnet only. Real balance requires synced node.\n');
+}
+
+async function cmdMineAndBalance(blocks: number, address?: string) {
+  // Combined: mine blocks then show balance
+  await cmdMine(blocks, address);
+
+  // Re-run mining on fresh chain to compute balance
+  const minerAddress = address || loadWallet()?.address;
+  if (!minerAddress) return;
+
+  const chain = new Blockchain(true);
+  for (let i = 0; i < blocks; i++) {
+    const result = await mineBlock(chain, minerAddress, [], false);
+    chain.addBlock(result.block);
+  }
+  const balance = chain.getBalance(minerAddress);
+  console.log(`Running balance: ${formatAXN(balance.confirmed)} (${balance.utxos.length} UTXOs)\n`);
+}
+
 async function cmdHelp() {
   banner();
   console.log('Commands:');
   console.log('  axon new                    Generate new wallet');
   console.log('  axon restore                Restore wallet from seed');
   console.log('  axon address                Show your wallet address');
+  console.log('  axon balance [address]      Show AXN balance for address');
   console.log('  axon mine [n]               Mine n blocks (default: 1)');
   console.log('  axon mine [n] --address X   Mine to specific address');
   console.log('  axon info                   Protocol info + issuance schedule');
@@ -200,6 +264,10 @@ async function main() {
       const addrIdx = args.indexOf('--address');
       const addr    = addrIdx !== -1 ? args[addrIdx + 1] : undefined;
       return cmdMine(n, addr);
+    }
+    case 'balance': {
+      const addr = args[1];
+      return cmdBalance(addr);
     }
     case 'test': {
       const { execSync } = require('child_process');

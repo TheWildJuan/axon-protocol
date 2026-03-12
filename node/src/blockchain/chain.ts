@@ -166,6 +166,19 @@ export class Blockchain {
     this.state.lastAdjustTime = endBlock.header.timestamp;
   }
 
+  getBalance(address: string): { confirmed: bigint; utxos: UTXO[] } {
+    const { addressToScript } = require('./block');
+    const targetScript = addressToScript(address);
+    const matching: UTXO[] = [];
+    for (const utxo of this.utxos.values()) {
+      if (utxo.scriptPubKey === targetScript) {
+        matching.push(utxo);
+      }
+    }
+    const total = matching.reduce((sum, u) => sum + u.value, 0n);
+    return { confirmed: total, utxos: matching };
+  }
+
   getIssuanceSchedule(): Array<{ era: number; startBlock: number; endBlock: number; reward: string; eraSupply: string }> {
     const schedule = [];
     for (let era = 0; era < 33; era++) {
