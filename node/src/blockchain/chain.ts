@@ -27,11 +27,11 @@ export class Blockchain {
   private persisted:  boolean;
   private initPromise: Promise<void>;
 
-  constructor(testnet = true, persist = false) {
+  constructor(testnet = true, persist = false, chainDir?: string) {
     this.testnet   = testnet;
     this.persisted = persist;
     if (persist) {
-      this.store = new ChainStore();
+      this.store = new ChainStore(chainDir);
     }
     this.initPromise = this.init();
   }
@@ -110,6 +110,20 @@ export class Blockchain {
   getBlockAtHeight(height: number): Block | undefined {
     const hash = this.heightIndex.get(height);
     return hash ? this.blocks.get(hash) : undefined;
+  }
+
+  async getBlockAtHeightAsync(height: number): Promise<Block | null> {
+    // Check in-memory first
+    const hash = this.heightIndex.get(height);
+    if (hash) {
+      const block = this.blocks.get(hash);
+      if (block) return block;
+    }
+    // Fall back to store
+    if (this.store) {
+      return this.store.getBlockAtHeight(height);
+    }
+    return null;
   }
 
   getUTXO(txid: string, index: number): UTXO | undefined {
@@ -258,8 +272,8 @@ export class Blockchain {
 
 // ─── FACTORY: open persistent chain ──────────────────────────────────────────
 
-export async function openChain(testnet = true): Promise<Blockchain> {
-  const chain = new Blockchain(testnet, true);
+export async function openChain(testnet = true, chainDir?: string): Promise<Blockchain> {
+  const chain = new Blockchain(testnet, true, chainDir);
   await chain.ready();
   return chain;
 }

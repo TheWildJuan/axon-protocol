@@ -15,6 +15,22 @@ import { Block, Transaction } from '../blockchain/types';
 import { Blockchain }         from '../blockchain/chain';
 import { hashBlock }          from '../blockchain/block';
 
+// BigInt-safe JSON helpers
+function bigintReplacer(_: string, v: unknown) {
+  return typeof v === 'bigint' ? { __bigint__: v.toString() } : v;
+}
+function restoreBigInts(obj: any): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'object' && '__bigint__' in obj) return BigInt(obj.__bigint__);
+  if (Array.isArray(obj)) return obj.map(restoreBigInts);
+  if (typeof obj === 'object') {
+    const out: any = {};
+    for (const k of Object.keys(obj)) out[k] = restoreBigInts(obj[k]);
+    return out;
+  }
+  return obj;
+}
+
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
 interface P2PMessage {
@@ -38,7 +54,7 @@ class PeerConnection {
   public  ready     = false;
   private buffer    = '';
   private socket:   net.Socket;
-  private onMsg:    (peer: PeerConnection, msg: P2PMessage) => void;
+  private onMsg:    (peer: PeerConnection, msg: P2PMessage) => void | Promise<void>;
   private onClose:  (peer: PeerConnection) => void;
 
   constructor(
@@ -68,7 +84,7 @@ class PeerConnection {
       if (!line.trim()) continue;
       try {
         const msg: P2PMessage = JSON.parse(line);
-        this.onMsg(this, msg);
+        Promise.resolve(this.onMsg(this, msg)).catch(() => {});
       } catch {
         // Invalid JSON — ignore
       }
@@ -77,9 +93,11 @@ class PeerConnection {
 
   send(type: string, payload: any = {}) {
     try {
-      const msg = JSON.stringify({ type, payload }) + '\n';
+      const msg = JSON.stringify({ type, payload }, bigintReplacer) + '\n';
       this.socket.write(msg);
-    } catch {}
+    } catch (e: any) {
+      // Serialization failure — log but don't crash
+    }
   }
 
   get address(): string {
@@ -164,7 +182,15 @@ export class P2PServer {
 
   // ── Message handling ──────────────────────────────────────────────────────
 
-  private handleMsg(peer: PeerConnection, msg: P2PMessage) {
+  private async handleMsg(peer: PeerConnection, msg: P2PMessage) {
+    try {
+      await this._handleMsg(peer, msg);
+    } catch(e: any) {
+      console.error(`[P2P] handleMsg error (${msg.type}):`, e.message);
+    }
+  }
+
+  private async _handleMsg(peer: PeerConnection, msg: P2PMessage) {
     switch (msg.type) {
 
       case 'VERSION': {
@@ -189,36 +215,48 @@ export class P2PServer {
 
       case 'GETBLOCKS': {
         const from  = msg.payload.fromHeight || 1;
-        const limit = 500; // max 500 blocks per response
+        const limit = 500;
         const blocks: Block[] = [];
-        for (let h = from; h <= Math.min(from + limit, this.chain.getHeight()); h++) {
-          const b = this.chain.getBlockAtHeight(h);
+        const maxH  = Math.min(from + limit - 1, this.chain.getHeight());
+        for (let h = from; h <= maxH; h++) {
+          const b = await (this.chain as any).getBlockAtHeightAsync(h);
           if (b) blocks.push(b);
         }
+        console.log(`[P2P] Sending ${blocks.length} blocks to ${peer.address} (heights ${from}-${maxH})`);
         peer.send('BLOCKS', { blocks });
         break;
       }
 
       case 'BLOCKS': {
         const blocks: Block[] = msg.payload.blocks || [];
+        // Sort by height ascending to ensure correct chain ordering
+        blocks.sort((a, b) => (a.height || 0) - (b.height || 0));
         let accepted = 0;
-        for (const block of blocks) {
-          // Convert bigint fields (JSON loses bigint)
-          restoreBlock(block);
-          const result = this.chain.addBlock(block);
-          if (result.success) accepted++;
+        for (let block of blocks) {
+          block = restoreBigInts(block); // restore BigInt fields (returns new object)
+          const result = await (this.chain as any).addBlockAsync(block);
+          if (result.success) {
+            accepted++;
+          } else {
+            console.log(`[P2P] Block h=${block.height} rejected: ${result.error}`);
+            break; // stop at first failure
+          }
         }
         if (accepted > 0) {
-          console.log(`[P2P] Synced ${accepted} blocks from ${peer.address}`);
+          console.log(`[P2P] Synced ${accepted}/${blocks.length} blocks from ${peer.address} → height ${this.chain.getHeight()}`);
+          // If peer is still ahead, request more
+          if (peer.info.height && this.chain.getHeight() < peer.info.height) {
+            peer.send('GETBLOCKS', { fromHeight: this.chain.getHeight() + 1 });
+          }
         }
         break;
       }
 
       case 'NEWBLOCK': {
-        const block: Block = msg.payload.block;
+        let block: Block = msg.payload.block;
         if (!block?.hash || this.seenBlocks.has(block.hash)) break;
         this.seenBlocks.add(block.hash);
-        restoreBlock(block);
+        block = restoreBigInts(block);
         const result = this.chain.addBlock(block);
         if (result.success) {
           console.log(`[P2P] Accepted block ${block.height} from ${peer.address}`);

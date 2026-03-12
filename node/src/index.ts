@@ -11,17 +11,19 @@ import { openChain, Blockchain } from './blockchain/chain';
 import { mineBlock }             from './mining/miner';
 import { keypairFromSeed, keypairFromMnemonic, formatAXN } from './wallet/wallet';
 import { getBlockReward, hashTx, addressToScript } from './blockchain/block';
-import { RPC_PORT }              from './blockchain/constants';
+// RPC_PORT imported from constants as fallback default only
 import { Transaction }           from './blockchain/types';
 import { P2PServer }             from './p2p/server';
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
 const RPC_HOST    = process.env.RPC_HOST    || '127.0.0.1';
+const RPC_PORT    = parseInt(process.env.RPC_PORT || '8332');
 const P2P_PORT    = parseInt(process.env.P2P_PORT || '8333');
 const MINER_SEED  = process.env.MINER_SEED  || 'axon-default-miner';
 const PEERS       = (process.env.PEERS || '').split(',').filter(Boolean);
 const TESTNET     = process.env.NETWORK !== 'mainnet';
+const CHAIN_DIR   = process.env.CHAIN_DIR   || undefined;
 
 // ─── MIN FEE POLICY ──────────────────────────────────────────────────────────
 // Minimum relay fee: 1 sat/byte = 1000 satoshis (~250 byte tx)
@@ -63,7 +65,7 @@ function getTopTxs(maxBytes = 1_000_000): Transaction[] {
 // ─── BOOT ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const chain  = await openChain(TESTNET);
+  const chain  = await openChain(TESTNET, CHAIN_DIR);
   const wallet = keypairFromSeed(MINER_SEED);
   let   mining = false;
 
